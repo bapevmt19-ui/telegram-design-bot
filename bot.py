@@ -370,11 +370,17 @@ def main():
     app.job_queue.run_daily(send_news_to_channel, time=time(hour=7, minute=0, tzinfo=vn_tz))
     app.job_queue.run_daily(send_book_to_channel, time=time(hour=20, minute=0, tzinfo=vn_tz)) 
 
-    import time
+    import time as sys_time
     logger.info("🤖 Quản Gia Life-OS đang khởi động...")
-    logger.info("Đang đợi 10s để huỷ session cũ trên Render tránh xung đột...")
-    time.sleep(10)
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    
+    # Loop chống lỗi Conflict khi deploy cuốn chiếu
+    while True:
+        try:
+            app.run_polling(allowed_updates=Update.ALL_TYPES)
+            break
+        except Exception as e:
+            logger.error(f"Lỗi Polling (chờ 5s thử lại): {e}")
+            sys_time.sleep(5)
 
 if __name__ == "__main__":
     main()
