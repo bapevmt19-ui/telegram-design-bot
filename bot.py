@@ -1,21 +1,21 @@
 """
-Telegram Life-OS Bot - Design, AI, Books, Finance & Personal Assistant & Todo
+Telegram Life-OS Bot - Design, AI, Books, Finance, Todo, Voice & Chart
 """
 import os
 import json
 import logging
 import asyncio
 import re
-from datetime import datetime, timedelta, time
+from datetime import datetime, time
 import pytz
+import matplotlib
+matplotlib.use('Agg') # Cho phép vẽ biểu đồ trên server không có màn hình
+import matplotlib.pyplot as plt
 
 from dotenv import load_dotenv
 import feedparser
 import trafilatura
-import requests
-from bs4 import BeautifulSoup
 from telegraph import Telegraph
-import markdown
 from google import genai
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, ContextTypes, CallbackQueryHandler, CommandHandler, MessageHandler, filters
@@ -32,9 +32,8 @@ CHAT_ID_NEWS = "-1004430444714"
 
 GEMINI_MODEL = "gemini-3.5-flash-lite"
 FINANCE_FILE = "finance.json"
-HISTORY_FILE = "read_history.json"
 TODO_FILE = "todos.json"
-BUDGET_PER_WEEK = 2000000 
+IDEAS_FILE = "ideas.json"
 
 RSS_FEEDS_DESIGN = {"💡 UX/UI Design": "https://uxdesign.cc/feed", "🎨 Web Design": "https://www.smashingmagazine.com/feed/"}
 RSS_FEEDS_AI = {"🤖 AI News": "https://www.artificialintelligence-news.com/feed/"}
@@ -67,278 +66,246 @@ def save_json(file_path, data):
         json.dump(data, f, indent=4)
 
 def parse_amount(amount_str):
-    amount_str = amount_str.lower().replace(",", "").replace(".", "")
+    amount_str = amount_str.lower().replace(",", "").replace(".", "").strip()
     if "k" in amount_str: return int(float(amount_str.replace("k", "")) * 1000)
     if "m" in amount_str or "tr" in amount_str: return int(float(amount_str.replace("m", "").replace("tr", "")) * 1000000)
     return int(amount_str)
 
-# --- QUẢN LÝ CÔNG VIỆC (TODO LIST) ---
-async def todo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/todo Nội dung công việc"""
-    if not context.args:
-        await update.message.reply_text("Sếp gõ: `/todo [Nội dung công việc]` (VD: `/todo Chiều 3h họp team`)", parse_mode=ParseMode.MARKDOWN)
+# --- CORE LOGIC (Dùng chung cho Lệnh gõ và Giọng nói) ---
+async def execute_spend(chat_id, context, amount, reason):
+    finance = load_json(FINANCE_FILE, {"salary": 0, "budgets": {}, "expenses": [], "timo_confirmed": False})
+    if not finance["timo_confirmed"]:
+        await context.bot.send_message(chat_id=chat_id, text="⚠️ Sếp chưa bấm nút xác nhận chia tiền vào hũ Timo đầu tháng!")
         return
-    task_text = " ".join(context.args)
+
+    finance["expenses"].append({"date": datetime.now().strftime("%Y-%m-%d"), "amount": amount, "reason": reason})
+    save_json(FINANCE_FILE, finance)
+    
+    current_month = datetime.now().strftime("%Y-%m")
+    month_expenses = [item["amount"] for item in finance["expenses"] if item["date"].startswith(current_month)]
+    total_spent = sum(month_expenses)
+    total_budget = sum(finance["budgets"].values()) if finance["budgets"] else finance["salary"]
+    remaining = total_budget - total_spent
+    
+    msg = f"💸 <b>ĐÃ TRỪ TIỀN:</b>\n• Số tiền: {amount:,.0f} VNĐ\n• Mục đích: {reason}\n\n📊 <b>CÒN LẠI THÁNG NÀY:</b> {remaining:,.0f} VNĐ"
+    if remaining < 0: msg += "\n\n🚨 <b>BÁO ĐỘNG ĐỎ: SẾP ĐÃ TIÊU ÂM QUỸ THÁNG NÀY!</b>"
+    await context.bot.send_message(chat_id=chat_id, text=clean_for_telegram(msg), parse_mode=ParseMode.HTML)
+
+async def execute_todo(chat_id, context, task_text):
     todos = load_json(TODO_FILE, {"tasks": []})
     task_id = str(int(datetime.now().timestamp()))
     todos["tasks"].append({"id": task_id, "text": task_text, "status": "pending"})
     save_json(TODO_FILE, todos)
-    
-    await update.message.reply_text(f"📝 Đã ghi nhận việc: <b>{task_text}</b>\n<i>Gõ /tasks để xem danh sách.</i>", parse_mode=ParseMode.HTML)
+    await context.bot.send_message(chat_id=chat_id, text=f"📝 Đã ghi nhận việc: <b>{task_text}</b>", parse_mode=ParseMode.HTML)
 
-async def render_tasks(chat_id, context: ContextTypes.DEFAULT_TYPE, message_id_to_edit=None):
-    """Vẽ bảng danh sách công việc và nút bấm"""
+async def execute_idea(chat_id, context, idea_text):
+    ideas = load_json(IDEAS_FILE, {"ideas": []})
+    ideas["ideas"].append({"date": datetime.now().strftime("%Y-%m-%d"), "text": idea_text})
+    save_json(IDEAS_FILE, ideas)
+    await context.bot.send_message(chat_id=chat_id, text="💡 <b>Đã cất ý tưởng này vào Bộ Não Thứ 2!</b>\n<i>(Sếp có thể hỏi lại bất cứ lúc nào)</i>", parse_mode=ParseMode.HTML)
+
+# --- QUẢN LÝ TÀI CHÍNH ---
+async def salary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        amount = parse_amount(context.args[0])
+        finance = load_json(FINANCE_FILE, {"salary": 0, "budgets": {}, "expenses": [], "timo_confirmed": False})
+        finance["salary"] = amount
+        finance["timo_confirmed"] = False
+        save_json(FINANCE_FILE, finance)
+        msg = f"💰 <b>ĐÃ GHI NHẬN LƯƠNG:</b> {amount:,.0f} VNĐ\nSếp hãy chia /budget và bấm nút dưới đây để xác nhận đã thao tác trên app Timo!"
+        keyboard = [[InlineKeyboardButton("🏦 Đã chia tiền vào các hũ Timo", callback_data="timo_confirm")]]
+        await update.message.reply_text(clean_for_telegram(msg), parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
+    except Exception:
+        await update.message.reply_text("Lỗi cú pháp! Gõ: /salary [số tiền]")
+
+async def budget_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        category = context.args[0].replace("_", " ").title()
+        amount = parse_amount(context.args[1])
+        finance = load_json(FINANCE_FILE, {"salary": 0, "budgets": {}, "expenses": [], "timo_confirmed": False})
+        finance["budgets"][category] = amount
+        save_json(FINANCE_FILE, finance)
+        await update.message.reply_text(f"🎯 <b>CẬP NHẬT QUỸ: {category}</b>\n• Hạn mức: {amount:,.0f} VNĐ", parse_mode=ParseMode.HTML)
+    except Exception:
+        await update.message.reply_text("Lỗi cú pháp! Gõ: /budget [tên hũ] [số tiền]")
+
+async def spend_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        amount = parse_amount(context.args[0])
+        reason = " ".join(context.args[1:])
+        await execute_spend(update.message.chat_id, context, amount, reason)
+    except Exception:
+        await update.message.reply_text("Lỗi cú pháp! Gõ: /spend [số tiền] [lý do]")
+
+async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Vẽ biểu đồ chi tiêu"""
+    finance = load_json(FINANCE_FILE, {"salary": 0, "budgets": {}, "expenses": [], "timo_confirmed": False})
+    current_month = datetime.now().strftime("%Y-%m")
+    month_expenses = [item for item in finance.get("expenses", []) if item["date"].startswith(current_month)]
+    
+    if not month_expenses:
+        await update.message.reply_text("Tháng này sếp chưa tiêu đồng nào cả!")
+        return
+        
+    categories = {}
+    for exp in month_expenses:
+        # Nhóm theo từ đầu tiên (Ví dụ: "Ăn sáng" -> "Ăn")
+        cat = exp['reason'].split()[0].title()
+        categories[cat] = categories.get(cat, 0) + exp['amount']
+        
+    labels = list(categories.keys())
+    sizes = list(categories.values())
+    
+    fig, ax = plt.subplots(figsize=(7, 7))
+    ax.pie(sizes, labels=labels, autopct='%1.1f%%', startangle=90, colors=plt.cm.Paired.colors)
+    ax.axis('equal')
+    
+    chart_path = "chart.png"
+    plt.title(f"Phân bổ chi tiêu tháng {current_month}")
+    plt.savefig(chart_path, bbox_inches='tight')
+    plt.close()
+    
+    await update.message.reply_photo(photo=open(chart_path, 'rb'), caption=f"📊 Báo cáo phân bổ chi tiêu tháng {current_month}")
+
+async def goal_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        item_name = " ".join(context.args[:-1])
+        goal_amount = parse_amount(context.args[-1])
+        finance = load_json(FINANCE_FILE, {"salary": 0, "budgets": {}, "expenses": [], "timo_confirmed": False})
+        salary = finance.get("salary", 0)
+        total_budget = sum(finance.get("budgets", {}).values())
+        monthly_saving = salary - total_budget
+        
+        if monthly_saving <= 0:
+            msg = f"⚠️ Sếp không còn tiền dư mỗi tháng (Thu: {salary:,.0f}, Chi: {total_budget:,.0f}). Không thể tiết kiệm!"
+        else:
+            months_needed = goal_amount / monthly_saving
+            msg = f"🎯 <b>MỤC TIÊU: {item_name.upper()}</b>\n• Thời gian dự kiến: <b>{months_needed:.1f} tháng</b>"
+        await update.message.reply_text(clean_for_telegram(msg), parse_mode=ParseMode.HTML)
+    except Exception:
+        pass
+
+# --- TODO LIST ---
+async def todo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    task_text = " ".join(context.args)
+    await execute_todo(update.message.chat_id, context, task_text)
+
+async def tasks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     todos = load_json(TODO_FILE, {"tasks": []})
     pending = [t for t in todos.get("tasks", []) if t["status"] == "pending"]
-    
     if not pending:
-        msg = "🎉 Sếp tuyệt vời! Không còn công việc nào tồn đọng."
-        if message_id_to_edit:
-            await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id_to_edit, text=msg)
-        else:
-            await context.bot.send_message(chat_id=chat_id, text=msg)
+        await update.message.reply_text("🎉 Không còn công việc nào tồn đọng.")
         return
-
     msg = "📝 <b>DANH SÁCH CÔNG VIỆC CHƯA LÀM:</b>\n\n"
     keyboard = []
     row = []
     for i, t in enumerate(pending):
         msg += f"<b>{i+1}.</b> {t['text']}\n"
         row.append(InlineKeyboardButton(f"✅ Xong {i+1}", callback_data=f"tododone_{t['id']}"))
-        if len(row) == 3: # 3 nút 1 hàng cho gọn
+        if len(row) == 3:
             keyboard.append(row)
             row = []
-    if row:
-        keyboard.append(row)
-        
-    if message_id_to_edit:
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id_to_edit, text=msg, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
-    else:
-        await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
+    if row: keyboard.append(row)
+    await update.message.reply_text(msg, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def tasks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/tasks - Xem danh sách việc"""
-    await render_tasks(update.message.chat_id, context)
-
-async def morning_todo_reminder(context: ContextTypes.DEFAULT_TYPE):
-    """Nhắc việc mỗi sáng"""
-    todos = load_json(TODO_FILE, {"tasks": []})
-    pending = [t for t in todos.get("tasks", []) if t["status"] == "pending"]
-    if pending:
-        await context.bot.send_message(chat_id=CHAT_ID_PRIVATE, text="🌅 Chào buổi sáng sếp! Báo cáo nhanh, đây là các việc sếp cần hoàn thành hôm nay:")
-        await render_tasks(CHAT_ID_PRIVATE, context)
-
-
-# --- TÀI CHÍNH (FINANCE LIFE-OS) ---
-async def salary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# --- VOICE OS & CHATBOT ---
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Xử lý giọng nói bằng Gemini"""
+    status_msg = await update.message.reply_text("🎙️ <i>Đang nghe và phân tích giọng nói...</i>", parse_mode=ParseMode.HTML)
     try:
-        if not context.args:
-            await update.message.reply_text("Sếp gõ theo cú pháp: `/salary [số tiền]` (VD: `/salary 20m`)", parse_mode=ParseMode.MARKDOWN)
-            return
-        amount = parse_amount(context.args[0])
-        finance = load_json(FINANCE_FILE, {"salary": 0, "budgets": {}, "expenses": [], "timo_confirmed": False})
-        finance["salary"] = amount
-        finance["timo_confirmed"] = False
-        save_json(FINANCE_FILE, finance)
+        voice_file = await context.bot.get_file(update.message.voice.file_id)
+        file_path = "temp_voice.ogg"
+        await voice_file.download_to_drive(file_path)
         
-        msg = f"💰 <b>ĐÃ GHI NHẬN LƯƠNG THÁNG NÀY:</b> {amount:,.0f} VNĐ\n\n"
-        msg += "Sếp hãy tiếp tục dùng lệnh <code>/budget [tên quỹ] [số tiền]</code> để chia nhỏ ngân sách (VD: <code>/budget ăn_uống 4m</code>). Sau khi chia xong, hãy bấm nút dưới đây để xác nhận đã chuyển tiền vào app Timo!"
+        audio = client.files.upload(file=file_path)
+        prompt = """Nghe file âm thanh và phân loại ý định của sếp. Chỉ trả về ĐÚNG 1 DÒNG DUY NHẤT theo chuẩn sau:
+        1. Tiêu tiền: SPEND|<số_tiền_bằng_số>|<lý_do> (VD: SPEND|50000|ăn phở)
+        2. Nhắc việc: TODO|<nội_dung> (VD: TODO|chiều 3h họp team)
+        3. Lưu ý tưởng: IDEA|<nội_dung_ý_tưởng>
+        4. Hỏi đáp: CHAT|<câu_hỏi_của_người_dùng>"""
         
-        keyboard = [[InlineKeyboardButton("🏦 Đã chia tiền vào các hũ Timo", callback_data="timo_confirm")]]
-        await update.message.reply_text(clean_for_telegram(msg), parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
-    except Exception:
-        await update.message.reply_text("Lỗi cú pháp!")
-
-async def budget_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        if len(context.args) < 2:
-            await update.message.reply_text("Sếp gõ: `/budget [tên hũ] [số tiền]` (VD: `/budget nhà_trọ 3m`)", parse_mode=ParseMode.MARKDOWN)
-            return
-        category = context.args[0].replace("_", " ").title()
-        amount = parse_amount(context.args[1])
-        finance = load_json(FINANCE_FILE, {"salary": 0, "budgets": {}, "expenses": [], "timo_confirmed": False})
-        finance["budgets"][category] = amount
-        save_json(FINANCE_FILE, finance)
+        res = client.models.generate_content(model="gemini-1.5-flash", contents=[audio, prompt]).text.strip()
+        await context.bot.delete_message(chat_id=update.message.chat_id, message_id=status_msg.message_id)
         
-        total_budget = sum(finance["budgets"].values())
-        salary = finance["salary"]
-        remaining = salary - total_budget
-        
-        msg = f"🎯 <b>CẬP NHẬT QUỸ: {category}</b>\n• Hạn mức: {amount:,.0f} VNĐ\n\n📊 <b>TỔNG QUAN THÁNG:</b>\n• Thu nhập: {salary:,.0f} VNĐ\n• Đã phân bổ: {total_budget:,.0f} VNĐ\n• Chưa phân bổ: {remaining:,.0f} VNĐ (Nên đưa vào hũ Tiết Kiệm)"
-        await update.message.reply_text(clean_for_telegram(msg), parse_mode=ParseMode.HTML)
-    except Exception:
-        await update.message.reply_text("Lỗi cú pháp!")
-
-async def spend_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        args = context.args
-        if len(args) < 2:
-            await update.message.reply_text("Sếp gõ: `/spend [số tiền] [lý do]` (VD: `/spend 50k ăn sáng`)", parse_mode=ParseMode.MARKDOWN)
-            return
-        amount = parse_amount(args[0])
-        reason = " ".join(args[1:])
-        
-        finance = load_json(FINANCE_FILE, {"salary": 0, "budgets": {}, "expenses": [], "timo_confirmed": False})
-        if not finance["timo_confirmed"]:
-            await update.message.reply_text("⚠️ Sếp chưa bấm nút xác nhận chia tiền vào hũ Timo đầu tháng! Hãy quản lý dòng tiền trước khi tiêu tiêu nhé.")
-            return
-
-        finance["expenses"].append({"date": datetime.now().strftime("%Y-%m-%d"), "amount": amount, "reason": reason})
-        save_json(FINANCE_FILE, finance)
-        
-        current_month = datetime.now().strftime("%Y-%m")
-        month_expenses = [item["amount"] for item in finance["expenses"] if item["date"].startswith(current_month)]
-        total_spent = sum(month_expenses)
-        total_budget = sum(finance["budgets"].values()) if finance["budgets"] else finance["salary"]
-        remaining = total_budget - total_spent
-        
-        msg = f"💸 <b>ĐÃ TRỪ TIỀN:</b>\n• Số tiền: {amount:,.0f} VNĐ\n• Mục đích: {reason}\n\n📊 <b>TỔNG KẾT THÁNG:</b>\n• Đã tiêu: {total_spent:,.0f} VNĐ\n• CÒN LẠI: {remaining:,.0f} VNĐ"
-        if remaining < 0: msg += "\n\n🚨 <b>BÁO ĐỘNG ĐỎ: SẾP ĐÃ TIÊU ÂM QUỸ THÁNG NÀY!</b>"
-        await update.message.reply_text(clean_for_telegram(msg), parse_mode=ParseMode.HTML)
-    except Exception:
-        await update.message.reply_text("Lỗi cú pháp!")
-
-async def goal_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        args = context.args
-        if len(args) < 2:
-            await update.message.reply_text("Sếp gõ: `/goal [tên món đồ] [giá tiền]`", parse_mode=ParseMode.MARKDOWN)
-            return
-        item_name = " ".join(args[:-1])
-        goal_amount = parse_amount(args[-1])
-        
-        finance = load_json(FINANCE_FILE, {"salary": 0, "budgets": {}, "expenses": [], "timo_confirmed": False})
-        salary = finance["salary"]
-        total_budget = sum(finance["budgets"].values())
-        
-        if salary <= 0:
-            await update.message.reply_text("Sếp chưa cài đặt thu nhập `/salary`!")
-            return
-            
-        monthly_saving = salary - total_budget
-        if monthly_saving <= 0:
-            msg = f"⚠️ Sếp không còn tiền dư mỗi tháng (Thu: {salary:,.0f}, Chi: {total_budget:,.0f}). Không thể tiết kiệm mua {item_name} lúc này!"
+        if res.startswith("SPEND|"):
+            parts = res.split("|", 2)
+            await execute_spend(update.message.chat_id, context, parse_amount(parts[1]), parts[2])
+        elif res.startswith("TODO|"):
+            await execute_todo(update.message.chat_id, context, res.split("|", 1)[1])
+        elif res.startswith("IDEA|"):
+            await execute_idea(update.message.chat_id, context, res.split("|", 1)[1])
+        elif res.startswith("CHAT|"):
+            chat_text = res.split("|", 1)[1]
+            await handle_chat_text(update, context, chat_text)
         else:
-            months_needed = goal_amount / monthly_saving
-            msg = f"🎯 <b>MỤC TIÊU TIẾT KIỆM: {item_name.upper()}</b>\n\n• Giá trị: {goal_amount:,.0f} VNĐ\n• Tiền dư hàng tháng: {monthly_saving:,.0f} VNĐ\n• Thời gian dự kiến: <b>{months_needed:.1f} tháng</b>\n\n💡 <i>Sếp hãy nhớ nạp số tiền dư này vào hũ Tiết Kiệm trên Timo ngay khi nhận lương nhé!</i>"
-        await update.message.reply_text(clean_for_telegram(msg), parse_mode=ParseMode.HTML)
-    except Exception:
-        await update.message.reply_text("Lỗi cú pháp!")
+            await update.message.reply_text(f"Không nhận diện được lệnh: {res}")
+    except Exception as e:
+        await context.bot.delete_message(chat_id=update.message.chat_id, message_id=status_msg.message_id)
+        await update.message.reply_text(f"⚠️ Lỗi nhận diện giọng nói: {e}")
+
+async def handle_chat_text(update, context, text):
+    if "#idea" in text.lower():
+        await execute_idea(update.message.chat_id, context, text.lower().replace("#idea", "").strip())
+        return
+
+    try:
+        ideas = load_json(IDEAS_FILE, {"ideas": []})
+        recent_ideas = "\n".join([f"- {i['text']}" for i in ideas.get("ideas", [])[-5:]])
+        ctx = f"GHI CHÚ HỆ THỐNG: Dưới đây là các ý tưởng sếp đã lưu gần đây:\n{recent_ideas}\n\n" if recent_ideas else ""
+        
+        prompt = ctx + text + "\n\n(Lưu ý: Trả lời ngắn gọn, TUYỆT ĐỐI KHÔNG dùng dấu ** hay ### hay #. Chỉ dùng văn bản thuần và emoji)."
+        response = chat_session.send_message(prompt).text
+        await update.message.reply_text(clean_for_telegram(response), parse_mode=ParseMode.HTML)
+    except Exception as e:
+        await update.message.reply_text(f"Lỗi: {e}")
+
+async def handle_chat_route(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await handle_chat_text(update, context, update.message.text)
 
 
 # --- TIN TỨC & SÁCH (CHANNELS) ---
 async def send_news_to_channel(context: ContextTypes.DEFAULT_TYPE):
     vn_tz = pytz.timezone('Asia/Ho_Chi_Minh')
     today_str = datetime.now(vn_tz).strftime("%Y-%m-%d")
+    prompt = "Tóm tắt 1 tin cực ngắn về AI hoặc Design hôm nay. Chỉ 2 dòng. Tuyệt đối KHÔNG dùng ký tự markdown như ** hay #."
+    try: intro = client.models.generate_content(model=GEMINI_MODEL, contents=prompt).text
+    except: intro = "Chúc sếp một ngày mới tràn đầy năng lượng!"
     
-    # 1. Mở bài
-    prompt = "Tóm tắt 1 tin cực ngắn về AI hoặc Design hôm nay. Chỉ 2 dòng. Tuyệt đối KHÔNG dùng ký tự markdown như ** hay #. Trình bày trơn tru."
-    try:
-        intro = client.models.generate_content(model=GEMINI_MODEL, contents=prompt).text
-    except:
-        intro = "Chúc sếp một ngày mới tràn đầy năng lượng!"
-    intro = clean_for_telegram(intro)
-    
-    msg = f"🌅 <b>BẢN TIN SÁNG - {today_str}</b>\n\n{intro}\n\n<i>(Hệ thống đang cào và dịch tin chi tiết, sếp đợi 1 phút nhé...)</i>"
+    msg = f"🌅 <b>BẢN TIN SÁNG - {today_str}</b>\n\n{clean_for_telegram(intro)}\n\n<i>(Hệ thống đang cào và dịch tin chi tiết, sếp đợi 1 phút nhé...)</i>"
     await context.bot.send_message(chat_id=CHAT_ID_NEWS, text=msg, parse_mode=ParseMode.HTML)
     
-    # 2. Cào tin thực tế (1 Design, 1 AI để tối ưu tốc độ)
     articles_sent = 0
     try:
-        # Cào Design
-        feed_design = feedparser.parse(RSS_FEEDS_DESIGN["💡 UX/UI Design"])
-        if feed_design.entries:
-            entry = feed_design.entries[0]
-            downloaded = trafilatura.fetch_url(entry.link)
-            if downloaded:
-                text_content = trafilatura.extract(downloaded)
-                if text_content:
-                    trans_prompt = f"Dịch bài viết sang tiếng Việt, giữ nguyên thuật ngữ Design. Trả về định dạng HTML cơ bản (chỉ dùng <h3>, <p>, <ul>, <li>, <b>, <i>). Nguồn:\n\n{text_content[:3000]}"
-                    trans_html = client.models.generate_content(model=GEMINI_MODEL, contents=trans_prompt).text
-                    trans_html = trans_html.replace("```html", "").replace("```", "").replace("<h1>", "<h3>").replace("<h2>", "<h3>")
-                    response = telegraph.create_page(title=entry.title[:100], html_content=trans_html + f"<br><br><a href='{entry.link}'>Link bài viết gốc</a>")
-                    await context.bot.send_message(chat_id=CHAT_ID_NEWS, text=f"🎨 <b>Design:</b> <a href='{response['url']}'>{entry.title}</a>", parse_mode=ParseMode.HTML)
-                    articles_sent += 1
-                    
-        # Cào AI
-        feed_ai = feedparser.parse(RSS_FEEDS_AI["🤖 AI News"])
-        if feed_ai.entries:
-            entry = feed_ai.entries[0]
-            downloaded = trafilatura.fetch_url(entry.link)
-            if downloaded:
-                text_content = trafilatura.extract(downloaded)
-                if text_content:
-                    trans_prompt = f"Dịch bài viết sang tiếng Việt, tập trung vào công nghệ AI. Trả về định dạng HTML cơ bản (chỉ dùng <h3>, <p>, <ul>, <li>, <b>, <i>). Nguồn:\n\n{text_content[:3000]}"
-                    trans_html = client.models.generate_content(model=GEMINI_MODEL, contents=trans_prompt).text
-                    trans_html = trans_html.replace("```html", "").replace("```", "").replace("<h1>", "<h3>").replace("<h2>", "<h3>")
-                    response = telegraph.create_page(title=entry.title[:100], html_content=trans_html + f"<br><br><a href='{entry.link}'>Link bài viết gốc</a>")
-                    await context.bot.send_message(chat_id=CHAT_ID_NEWS, text=f"🤖 <b>AI:</b> <a href='{response['url']}'>{entry.title}</a>", parse_mode=ParseMode.HTML)
-                    articles_sent += 1
-    except Exception as e:
-        logger.error(f"Lỗi cào tin: {e}")
+        for title, url, tag in [("💡 UX/UI Design", RSS_FEEDS_DESIGN["💡 UX/UI Design"], "🎨 Design"), ("🤖 AI News", RSS_FEEDS_AI["🤖 AI News"], "🤖 AI")]:
+            feed = feedparser.parse(url)
+            if feed.entries:
+                entry = feed.entries[0]
+                downloaded = trafilatura.fetch_url(entry.link)
+                if downloaded:
+                    text_content = trafilatura.extract(downloaded)
+                    if text_content:
+                        trans_prompt = f"Dịch bài viết sang tiếng Việt. Trả về định dạng HTML cơ bản (chỉ dùng <h3>, <p>, <ul>, <li>, <b>, <i>). Nguồn:\n\n{text_content[:3000]}"
+                        trans_html = client.models.generate_content(model=GEMINI_MODEL, contents=trans_prompt).text
+                        trans_html = trans_html.replace("```html", "").replace("```", "").replace("<h1>", "<h3>").replace("<h2>", "<h3>")
+                        response = telegraph.create_page(title=entry.title[:100], html_content=trans_html + f"<br><br><a href='{entry.link}'>Link bài viết gốc</a>")
+                        await context.bot.send_message(chat_id=CHAT_ID_NEWS, text=f"{tag}: <a href='{response['url']}'>{entry.title}</a>", parse_mode=ParseMode.HTML)
+                        articles_sent += 1
+    except Exception as e: logger.error(f"Lỗi cào tin: {e}")
         
-    # 3. Nút xác nhận
     if articles_sent > 0:
         keyboard = [[InlineKeyboardButton("👁️ Xác nhận đã đọc xong tin", callback_data=f"read_{today_str}")]]
         await context.bot.send_message(chat_id=CHAT_ID_NEWS, text="📡 <i>Đã dịch và cập nhật xong bản tin hôm nay!</i>", parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
-    else:
-        await context.bot.send_message(chat_id=CHAT_ID_NEWS, text="📡 <i>Hôm nay không có bài viết mới nào hoặc bị chặn truy cập.</i>", parse_mode=ParseMode.HTML)
 
 async def send_book_to_channel(context: ContextTypes.DEFAULT_TYPE):
     vn_tz = pytz.timezone('Asia/Ho_Chi_Minh')
     today_str = datetime.now(vn_tz).strftime("%Y-%m-%d")
-    prompt = """Đóng vai học giả. Trích NGUYÊN VĂN 1 đoạn trích tinh hoa (300 chữ) từ 1 cuốn sách Tâm lý/Triết học/Tiền bạc kinh điển. KHÔNG DÙNG Markdown (**, #, ###).
-    Cấu trúc:
+    prompt = """Trích NGUYÊN VĂN 1 đoạn trích tinh hoa (300 chữ) từ 1 cuốn sách Tâm lý/Tiền bạc kinh điển. KHÔNG DÙNG Markdown (**, #, ###).
     [Emoji] Tên sách - Tác giả
-    
     [Nội dung trích đoạn]
-    
     💡 Suy ngẫm của quản gia: (1 câu đúc kết)"""
     response = client.models.generate_content(model=GEMINI_MODEL, contents=prompt).text
-    clean_text = clean_for_telegram(response)
-    
     keyboard = [[InlineKeyboardButton("📖 Đã đọc xong & Suy ngẫm", callback_data=f"book_read_{today_str}")]]
-    await context.bot.send_message(chat_id=CHAT_ID_BOOKS, text=clean_text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
-
-
-# --- CHATBOT (DIRECT MESSAGE) ---
-async def handle_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    try:
-        prompt = text + "\n\n(Lưu ý hệ thống: Trả lời ngắn gọn, súc tích. TUYỆT ĐỐI KHÔNG dùng dấu ** hay ### hay #. Chỉ dùng văn bản thường và gạch đầu dòng emoji)."
-        response = chat_session.send_message(prompt).text
-        clean_msg = clean_for_telegram(response)
-        await update.message.reply_text(clean_msg, parse_mode=ParseMode.HTML)
-    except Exception as e:
-        await update.message.reply_text(f"Quản gia đang bận xử lý dữ liệu: {e}")
-
-# --- CALLBACKS ---
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    if query.data == "timo_confirm":
-        finance = load_json(FINANCE_FILE, {})
-        finance["timo_confirmed"] = True
-        save_json(FINANCE_FILE, finance)
-        await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ Đã chia tiền thành công", callback_data="none")]]))
-        
-    elif query.data.startswith("book_read_"):
-        now_str = datetime.now(pytz.timezone('Asia/Ho_Chi_Minh')).strftime("%H:%M")
-        await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"✅ Sếp đã đọc lúc {now_str}", callback_data="none")]]))
-        
-    elif query.data.startswith("read_"):
-        now_str = datetime.now(pytz.timezone('Asia/Ho_Chi_Minh')).strftime("%H:%M")
-        await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"✅ Sếp đã nắm bắt tin tức lúc {now_str}", callback_data="none")]]))
-        
-    elif query.data.startswith("tododone_"):
-        task_id = query.data.split("_")[1]
-        todos = load_json(TODO_FILE, {"tasks": []})
-        for t in todos.get("tasks", []):
-            if t["id"] == task_id:
-                t["status"] = "completed"
-        save_json(TODO_FILE, todos)
-        await render_tasks(query.message.chat_id, context, query.message.message_id)
+    await context.bot.send_message(chat_id=CHAT_ID_BOOKS, text=clean_for_telegram(response), parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def manual_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Đang đẩy bài test ra các kênh...")
@@ -357,29 +324,48 @@ def run_dummy_server():
     port = int(os.environ.get("PORT", 8080))
     HTTPServer(("0.0.0.0", port), DummyHandler).serve_forever()
 
+# --- MAIN ---
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.data == "timo_confirm":
+        finance = load_json(FINANCE_FILE, {})
+        finance["timo_confirmed"] = True
+        save_json(FINANCE_FILE, finance)
+        await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ Đã chia tiền thành công", callback_data="none")]]))
+    elif query.data.startswith("book_read_"):
+        await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"✅ Sếp đã đọc lúc {datetime.now(pytz.timezone('Asia/Ho_Chi_Minh')).strftime('%H:%M')}", callback_data="none")]]))
+    elif query.data.startswith("read_"):
+        await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"✅ Sếp đã nắm bắt tin tức lúc {datetime.now(pytz.timezone('Asia/Ho_Chi_Minh')).strftime('%H:%M')}", callback_data="none")]]))
+    elif query.data.startswith("tododone_"):
+        task_id = query.data.split("_")[1]
+        todos = load_json(TODO_FILE, {"tasks": []})
+        for t in todos.get("tasks", []):
+            if t["id"] == task_id: t["status"] = "completed"
+        save_json(TODO_FILE, todos)
+        await tasks_command(update, context) # Re-render (simplified)
+
 def main():
     threading.Thread(target=run_dummy_server, daemon=True).start()
-    chat_session.send_message("Từ giờ bạn là Quản Gia Life-OS của tôi. Trả lời chuyên nghiệp, dùng ngôn từ sang trọng. TUYỆT ĐỐI KHÔNG DÙNG CÁC KÝ TỰ MARKDOWN như ** hay #. Trình bày bằng văn bản thuần và emoji.")
+    chat_session.send_message("Từ giờ bạn là Quản Gia Life-OS của tôi. Trả lời chuyên nghiệp, KHÔNG DÙNG MARKDOWN xấu như ** hay #.")
 
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # Commands
     app.add_handler(CommandHandler("salary", salary_command))
     app.add_handler(CommandHandler("budget", budget_command))
     app.add_handler(CommandHandler("spend", spend_command))
     app.add_handler(CommandHandler("goal", goal_command))
+    app.add_handler(CommandHandler("report", report_command))
     app.add_handler(CommandHandler("todo", todo_command))
     app.add_handler(CommandHandler("tasks", tasks_command))
     app.add_handler(CommandHandler("push", manual_trigger))
     
-    # Handlers
     app.add_handler(CallbackQueryHandler(button_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat))
+    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat_route))
 
-    # Cron Jobs
     vn_tz = pytz.timezone('Asia/Ho_Chi_Minh')
     app.job_queue.run_daily(send_news_to_channel, time=time(hour=7, minute=0, tzinfo=vn_tz))
-    app.job_queue.run_daily(morning_todo_reminder, time=time(hour=7, minute=5, tzinfo=vn_tz)) # Gửi task lúc 7h05 sáng
     app.job_queue.run_daily(send_book_to_channel, time=time(hour=20, minute=0, tzinfo=vn_tz)) 
 
     logger.info("🤖 Quản Gia Life-OS đang khởi động...")
