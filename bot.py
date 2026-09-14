@@ -230,13 +230,59 @@ async def goal_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def send_news_to_channel(context: ContextTypes.DEFAULT_TYPE):
     vn_tz = pytz.timezone('Asia/Ho_Chi_Minh')
     today_str = datetime.now(vn_tz).strftime("%Y-%m-%d")
+    
+    # 1. Mở bài
     prompt = "Tóm tắt 1 tin cực ngắn về AI hoặc Design hôm nay. Chỉ 2 dòng. Tuyệt đối KHÔNG dùng ký tự markdown như ** hay #. Trình bày trơn tru."
-    intro = client.models.generate_content(model=GEMINI_MODEL, contents=prompt).text
+    try:
+        intro = client.models.generate_content(model=GEMINI_MODEL, contents=prompt).text
+    except:
+        intro = "Chúc sếp một ngày mới tràn đầy năng lượng!"
     intro = clean_for_telegram(intro)
     
-    msg = f"🌅 <b>BẢN TIN SÁNG - {today_str}</b>\n\n{intro}\n\n<i>(Hệ thống đang cào tin chi tiết...)</i>"
+    msg = f"🌅 <b>BẢN TIN SÁNG - {today_str}</b>\n\n{intro}\n\n<i>(Hệ thống đang cào và dịch tin chi tiết, sếp đợi 1 phút nhé...)</i>"
     await context.bot.send_message(chat_id=CHAT_ID_NEWS, text=msg, parse_mode=ParseMode.HTML)
-    await context.bot.send_message(chat_id=CHAT_ID_NEWS, text="📡 <i>Đã cập nhật các bài viết mới lên Telegraph.</i>", parse_mode=ParseMode.HTML)
+    
+    # 2. Cào tin thực tế (1 Design, 1 AI để tối ưu tốc độ)
+    articles_sent = 0
+    try:
+        # Cào Design
+        feed_design = feedparser.parse(RSS_FEEDS_DESIGN["💡 UX/UI Design"])
+        if feed_design.entries:
+            entry = feed_design.entries[0]
+            downloaded = trafilatura.fetch_url(entry.link)
+            if downloaded:
+                text_content = trafilatura.extract(downloaded)
+                if text_content:
+                    trans_prompt = f"Dịch bài viết sang tiếng Việt, giữ nguyên thuật ngữ Design. Trả về định dạng HTML cơ bản (chỉ dùng <h3>, <p>, <ul>, <li>, <b>, <i>). Nguồn:\n\n{text_content[:3000]}"
+                    trans_html = client.models.generate_content(model=GEMINI_MODEL, contents=trans_prompt).text
+                    trans_html = trans_html.replace("```html", "").replace("```", "").replace("<h1>", "<h3>").replace("<h2>", "<h3>")
+                    response = telegraph.create_page(title=entry.title[:100], html_content=trans_html + f"<br><br><a href='{entry.link}'>Link bài viết gốc</a>")
+                    await context.bot.send_message(chat_id=CHAT_ID_NEWS, text=f"🎨 <b>Design:</b> <a href='{response['url']}'>{entry.title}</a>", parse_mode=ParseMode.HTML)
+                    articles_sent += 1
+                    
+        # Cào AI
+        feed_ai = feedparser.parse(RSS_FEEDS_AI["🤖 AI News"])
+        if feed_ai.entries:
+            entry = feed_ai.entries[0]
+            downloaded = trafilatura.fetch_url(entry.link)
+            if downloaded:
+                text_content = trafilatura.extract(downloaded)
+                if text_content:
+                    trans_prompt = f"Dịch bài viết sang tiếng Việt, tập trung vào công nghệ AI. Trả về định dạng HTML cơ bản (chỉ dùng <h3>, <p>, <ul>, <li>, <b>, <i>). Nguồn:\n\n{text_content[:3000]}"
+                    trans_html = client.models.generate_content(model=GEMINI_MODEL, contents=trans_prompt).text
+                    trans_html = trans_html.replace("```html", "").replace("```", "").replace("<h1>", "<h3>").replace("<h2>", "<h3>")
+                    response = telegraph.create_page(title=entry.title[:100], html_content=trans_html + f"<br><br><a href='{entry.link}'>Link bài viết gốc</a>")
+                    await context.bot.send_message(chat_id=CHAT_ID_NEWS, text=f"🤖 <b>AI:</b> <a href='{response['url']}'>{entry.title}</a>", parse_mode=ParseMode.HTML)
+                    articles_sent += 1
+    except Exception as e:
+        logger.error(f"Lỗi cào tin: {e}")
+        
+    # 3. Nút xác nhận
+    if articles_sent > 0:
+        keyboard = [[InlineKeyboardButton("👁️ Xác nhận đã đọc xong tin", callback_data=f"read_{today_str}")]]
+        await context.bot.send_message(chat_id=CHAT_ID_NEWS, text="📡 <i>Đã dịch và cập nhật xong bản tin hôm nay!</i>", parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
+    else:
+        await context.bot.send_message(chat_id=CHAT_ID_NEWS, text="📡 <i>Hôm nay không có bài viết mới nào hoặc bị chặn truy cập.</i>", parse_mode=ParseMode.HTML)
 
 async def send_book_to_channel(context: ContextTypes.DEFAULT_TYPE):
     vn_tz = pytz.timezone('Asia/Ho_Chi_Minh')
@@ -280,6 +326,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data.startswith("book_read_"):
         now_str = datetime.now(pytz.timezone('Asia/Ho_Chi_Minh')).strftime("%H:%M")
         await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"✅ Sếp đã đọc lúc {now_str}", callback_data="none")]]))
+        
+    elif query.data.startswith("read_"):
+        now_str = datetime.now(pytz.timezone('Asia/Ho_Chi_Minh')).strftime("%H:%M")
+        await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"✅ Sếp đã nắm bắt tin tức lúc {now_str}", callback_data="none")]]))
         
     elif query.data.startswith("tododone_"):
         task_id = query.data.split("_")[1]
