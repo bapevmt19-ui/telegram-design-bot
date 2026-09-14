@@ -45,7 +45,10 @@ telegraph = Telegraph()
 telegraph.create_account(short_name='LifeOS', author_name='Quản Gia Life-OS')
 
 client = genai.Client(api_key=GEMINI_API_KEY)
-chat_session = client.chats.create(model=GEMINI_MODEL)
+chat_session = client.chats.create(
+    model=GEMINI_MODEL,
+    config=dict(system_instruction="Từ giờ bạn là Quản Gia Life-OS của tôi. Trả lời chuyên nghiệp, dùng ngôn từ sang trọng. TUYỆT ĐỐI KHÔNG DÙNG CÁC KÝ TỰ MARKDOWN như ** hay #. Trình bày bằng văn bản thuần và emoji.")
+)
 
 # --- HELPER FORMATTING ---
 def clean_for_telegram(text: str) -> str:
@@ -347,7 +350,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     threading.Thread(target=run_dummy_server, daemon=True).start()
-    chat_session.send_message("Từ giờ bạn là Quản Gia Life-OS của tôi. Trả lời chuyên nghiệp, KHÔNG DÙNG MARKDOWN xấu như ** hay #.")
 
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
