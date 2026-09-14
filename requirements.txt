@@ -1,0 +1,10 @@
+google-genai==2.23.0
+python-telegram-bot==22.8
+apscheduler==3.11.3
+python-dotenv==1.2.3
+feedparser==6.0.14
+trafilatura==2.2.0
+telegraph==2.2.0
+markdown==3.10.3
+beautifulsoup4==4.15.0
+requests==2.34.2
