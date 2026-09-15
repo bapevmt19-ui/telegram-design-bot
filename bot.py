@@ -320,9 +320,11 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 class DummyHandler(BaseHTTPRequestHandler):
     def do_GET(self):
+        msg = b"Life-OS Bot is running!"
         self.send_response(200)
+        self.send_header("Content-Length", str(len(msg)))
         self.end_headers()
-        self.wfile.write(b"Life-OS Bot is running!")
+        self.wfile.write(msg)
 def run_dummy_server():
     port = int(os.environ.get("PORT", 8080))
     HTTPServer(("0.0.0.0", port), DummyHandler).serve_forever()
