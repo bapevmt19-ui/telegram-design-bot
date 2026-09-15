@@ -6,7 +6,7 @@ import json
 import logging
 import asyncio
 import re
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 import pytz
 import matplotlib
 matplotlib.use('Agg') # Cho phép vẽ biểu đồ trên server không có màn hình
@@ -34,6 +34,7 @@ GEMINI_MODEL = "gemini-3.5-flash-lite"
 FINANCE_FILE = "finance.json"
 TODO_FILE = "todos.json"
 IDEAS_FILE = "ideas.json"
+REMINDERS_FILE = "reminders.json"
 
 RSS_FEEDS_DESIGN = {"💡 UX/UI Design": "https://uxdesign.cc/feed", "🎨 Web Design": "https://www.smashingmagazine.com/feed/"}
 RSS_FEEDS_AI = {"🤖 AI News": "https://www.artificialintelligence-news.com/feed/"}
@@ -211,6 +212,59 @@ async def tasks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if row: keyboard.append(row)
     await update.message.reply_text(msg, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))
 
+# --- HỆ THỐNG BÁO THỨC / NHẮC NHỞ ---
+async def send_reminder_job(context: ContextTypes.DEFAULT_TYPE):
+    data = context.job.data
+    task_id, chat_id, task_text = data["id"], data["chat_id"], data["text"]
+    
+    reminders = load_json(REMINDERS_FILE, {"reminders": []})
+    for r in reminders["reminders"]:
+        if r["id"] == task_id: r["status"] = "done"
+    save_json(REMINDERS_FILE, reminders)
+    
+    await context.bot.send_message(chat_id=chat_id, text=f"🔔 <b>BÁO THỨC / NHẮC NHỞ:</b>\nSếp ơi, đến giờ: <b>{task_text}</b>", parse_mode=ParseMode.HTML)
+
+def add_reminder(job_queue, chat_id, remind_time: datetime, task_text: str):
+    task_id = str(int(datetime.now().timestamp() * 1000))
+    reminders = load_json(REMINDERS_FILE, {"reminders": []})
+    reminders["reminders"].append({
+        "id": task_id, "chat_id": chat_id, "time": remind_time.strftime("%Y-%m-%d %H:%M"),
+        "text": task_text, "status": "pending"
+    })
+    save_json(REMINDERS_FILE, reminders)
+    job_queue.run_once(send_reminder_job, when=remind_time, data={"id": task_id, "chat_id": chat_id, "text": task_text})
+
+def load_pending_reminders(job_queue):
+    vn_tz = pytz.timezone('Asia/Ho_Chi_Minh')
+    reminders = load_json(REMINDERS_FILE, {"reminders": []})
+    now = datetime.now(vn_tz)
+    for r in reminders["reminders"]:
+        if r["status"] == "pending":
+            try:
+                r_time = vn_tz.localize(datetime.strptime(r["time"], "%Y-%m-%d %H:%M"))
+                if r_time > now:
+                    job_queue.run_once(send_reminder_job, when=r_time, data={"id": r["id"], "chat_id": r["chat_id"], "text": r["text"]})
+                else:
+                    r["status"] = "missed"
+            except Exception: pass
+    save_json(REMINDERS_FILE, reminders)
+
+async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        time_str = context.args[0]
+        task_text = " ".join(context.args[1:])
+        vn_tz = pytz.timezone('Asia/Ho_Chi_Minh')
+        now = datetime.now(vn_tz)
+        
+        hour, minute = map(int, time_str.split(":"))
+        remind_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if remind_time < now: remind_time += timedelta(days=1)
+            
+        add_reminder(context.application.job_queue, update.message.chat_id, remind_time, task_text)
+        await update.message.reply_text(f"⏰ Đã hẹn giờ báo thức lúc <b>{remind_time.strftime('%H:%M %d/%m')}</b> cho việc:\n{task_text}", parse_mode=ParseMode.HTML)
+    except Exception:
+        await update.message.reply_text("Lỗi cú pháp! Gõ: /remind HH:MM [Nội dung] (VD: /remind 15:30 Họp team)")
+
 # --- VOICE OS & CHATBOT ---
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Xử lý giọng nói bằng Gemini"""
@@ -220,12 +274,17 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_path = "temp_voice.ogg"
         await voice_file.download_to_drive(file_path)
         
+        vn_tz = pytz.timezone('Asia/Ho_Chi_Minh')
+        now_str = datetime.now(vn_tz).strftime("%Y-%m-%d %H:%M")
+        
         audio = client.files.upload(file=file_path)
-        prompt = """Nghe file âm thanh và phân loại ý định của sếp. Chỉ trả về ĐÚNG 1 DÒNG DUY NHẤT theo chuẩn sau:
+        prompt = f"""Bây giờ là: {now_str}.
+        Nghe file âm thanh và phân loại ý định của sếp. Chỉ trả về ĐÚNG 1 DÒNG DUY NHẤT theo chuẩn sau:
         1. Tiêu tiền: SPEND|<số_tiền_bằng_số>|<lý_do> (VD: SPEND|50000|ăn phở)
-        2. Nhắc việc: TODO|<nội_dung> (VD: TODO|chiều 3h họp team)
-        3. Lưu ý tưởng: IDEA|<nội_dung_ý_tưởng>
-        4. Hỏi đáp: CHAT|<câu_hỏi_của_người_dùng>"""
+        2. Nhắc việc To-do: TODO|<nội_dung> (VD: TODO|chiều 3h họp team)
+        3. Hẹn giờ báo thức: REMIND|YYYY-MM-DD HH:MM|<nội_dung> (VD: REMIND|2026-09-15 15:30|Họp team)
+        4. Lưu ý tưởng: IDEA|<nội_dung_ý_tưởng>
+        5. Hỏi đáp: CHAT|<câu_hỏi_của_người_dùng>"""
         
         res = client.models.generate_content(model="gemini-1.5-flash", contents=[audio, prompt]).text.strip()
         await context.bot.delete_message(chat_id=update.message.chat_id, message_id=status_msg.message_id)
@@ -235,6 +294,11 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await execute_spend(update.message.chat_id, context, parse_amount(parts[1]), parts[2])
         elif res.startswith("TODO|"):
             await execute_todo(update.message.chat_id, context, res.split("|", 1)[1])
+        elif res.startswith("REMIND|"):
+            parts = res.split("|", 2)
+            r_time = vn_tz.localize(datetime.strptime(parts[1], "%Y-%m-%d %H:%M"))
+            add_reminder(context.application.job_queue, update.message.chat_id, r_time, parts[2])
+            await update.message.reply_text(f"⏰ Đã hẹn báo thức lúc <b>{r_time.strftime('%H:%M %d/%m')}</b> cho việc:\n{parts[2]}", parse_mode=ParseMode.HTML)
         elif res.startswith("IDEA|"):
             await execute_idea(update.message.chat_id, context, res.split("|", 1)[1])
         elif res.startswith("CHAT|"):
@@ -361,6 +425,7 @@ def main():
     app.add_handler(CommandHandler("goal", goal_command))
     app.add_handler(CommandHandler("report", report_command))
     app.add_handler(CommandHandler("todo", todo_command))
+    app.add_handler(CommandHandler("remind", remind_command))
     app.add_handler(CommandHandler("tasks", tasks_command))
     app.add_handler(CommandHandler("push", manual_trigger))
     
@@ -371,6 +436,8 @@ def main():
     vn_tz = pytz.timezone('Asia/Ho_Chi_Minh')
     app.job_queue.run_daily(send_news_to_channel, time=time(hour=7, minute=0, tzinfo=vn_tz))
     app.job_queue.run_daily(send_book_to_channel, time=time(hour=20, minute=0, tzinfo=vn_tz)) 
+    
+    load_pending_reminders(app.job_queue)
 
     import time as sys_time
     logger.info("🤖 Quản Gia Life-OS đang khởi động...")
