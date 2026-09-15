@@ -35,6 +35,8 @@ FINANCE_FILE = "finance.json"
 TODO_FILE = "todos.json"
 IDEAS_FILE = "ideas.json"
 REMINDERS_FILE = "reminders.json"
+HEALTH_FILE = "health.json"
+NUTRITION_FILE = "nutrition.json"
 
 RSS_FEEDS_DESIGN = {"💡 UX/UI Design": "https://uxdesign.cc/feed", "🎨 Web Design": "https://www.smashingmagazine.com/feed/"}
 RSS_FEEDS_AI = {"🤖 AI News": "https://www.artificialintelligence-news.com/feed/"}
@@ -265,6 +267,106 @@ async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         await update.message.reply_text("Lỗi cú pháp! Gõ: /remind HH:MM [Nội dung] (VD: /remind 15:30 Họp team)")
 
+# --- HEALTH-OS (DINH DƯỠNG & SỨC KHOẺ) ---
+async def healthsetup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = " ".join(context.args)
+    if not text:
+        await update.message.reply_text("💪 Sếp vui lòng nhập thông tin. VD:\n`/healthsetup Tôi 25 tuổi, nam, cao 1m70, nặng 65kg, dân văn phòng ít vận động, muốn giảm mỡ`", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    status_msg = await update.message.reply_text("⚙️ <i>Đang tính toán phác đồ dinh dưỡng chuẩn y khoa...</i>", parse_mode=ParseMode.HTML)
+    prompt = f"""Trích xuất thông tin sức khoẻ từ câu sau: "{text}".
+    Trả về ĐÚNG định dạng JSON (không markdown, không giải thích):
+    {{"age": 25, "gender": "male", "height_cm": 170, "weight_kg": 65, "activity_level": 1.2, "goal": "loss"}}
+    Ghi chú activity_level: 1.2 (ít vận động), 1.375 (nhẹ), 1.55 (vừa), 1.725 (nặng), 1.9 (rất nặng). Goal: loss (giảm), gain (tăng), maintain (giữ)."""
+    
+    try:
+        res = client.models.generate_content(model="gemini-1.5-flash", contents=prompt).text
+        data = json.loads(res.replace("```json", "").replace("```", "").strip())
+        
+        if data['gender'] == 'male':
+            bmr = (10 * data['weight_kg']) + (6.25 * data['height_cm']) - (5 * data['age']) + 5
+        else:
+            bmr = (10 * data['weight_kg']) + (6.25 * data['height_cm']) - (5 * data['age']) - 161
+            
+        tdee = bmr * data['activity_level']
+        target_calories = tdee
+        if data['goal'] == 'loss': target_calories -= 500
+        elif data['goal'] == 'gain': target_calories += 500
+        
+        protein = (target_calories * 0.4) / 4
+        carb = (target_calories * 0.3) / 4
+        fat = (target_calories * 0.3) / 9
+        
+        profile = {
+            "age": data['age'], "height_cm": data['height_cm'], "weight_kg": data['weight_kg'],
+            "tdee": int(tdee), "target_calories": int(target_calories),
+            "macros": {"protein": int(protein), "carb": int(carb), "fat": int(fat)}
+        }
+        save_json(HEALTH_FILE, profile)
+        
+        msg = f"📊 <b>HỒ SƠ DINH DƯỠNG ĐÃ THIẾT LẬP</b>\n\n"
+        msg += f"🔥 <b>TDEE (Calo giữ cân):</b> {int(tdee)} kcal/ngày\n"
+        msg += f"🎯 <b>Calo mục tiêu ({data['goal']}):</b> {int(target_calories)} kcal/ngày\n\n"
+        msg += f"🥩 <b>Protein (Cơ bắp):</b> {int(protein)}g\n"
+        msg += f"🍚 <b>Carb (Năng lượng):</b> {int(carb)}g\n"
+        msg += f"🥑 <b>Fat (Nội tiết):</b> {int(fat)}g\n\n"
+        msg += f"<i>(Giờ sếp cứ chụp ảnh bữa ăn hoặc cái cân gửi vào đây, em sẽ tự trừ vào quỹ Calo hôm nay nhé!)</i>"
+        
+        await context.bot.delete_message(chat_id=update.message.chat_id, message_id=status_msg.message_id)
+        await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        await context.bot.delete_message(chat_id=update.message.chat_id, message_id=status_msg.message_id)
+        await update.message.reply_text(f"Lỗi: Không nhận diện được dữ liệu. Sếp nhập lại rõ hơn nhé! ({e})")
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    status_msg = await update.message.reply_text("🔍 <i>Đang soi món ăn và tính Calo...</i>", parse_mode=ParseMode.HTML)
+    try:
+        photo_file = await update.message.photo[-1].get_file()
+        file_path = "temp_food.jpg"
+        await photo_file.download_to_drive(file_path)
+        
+        health = load_json(HEALTH_FILE, {})
+        target = health.get("target_calories", 2000)
+        
+        img = client.files.upload(file=file_path)
+        prompt = f"""Bạn là một chuyên gia dinh dưỡng. Người dùng vừa tải lên hình ảnh bữa ăn, đồ ăn, hoặc cái cân.
+        Mục tiêu 1 ngày của người dùng là nạp {target} Calories.
+        Hãy ước lượng khẩu phần và tính toán.
+        Trả về ĐÚNG định dạng JSON sau (không chứa ký tự thừa):
+        {{"food_name": "Tên món ăn (hoặc Cân nặng nếu là ảnh cái cân)", "calories": 500, "protein": 30, "carb": 40, "fat": 15, "advice": "Nhận xét ngắn gọn 1 câu xem món này có tốt cho mục tiêu không (kèm emoji)"}}"""
+        
+        res = client.models.generate_content(model="gemini-1.5-flash", contents=[img, prompt]).text.strip()
+        data = json.loads(res.replace("```json", "").replace("```", "").strip())
+        
+        vn_tz = pytz.timezone('Asia/Ho_Chi_Minh')
+        today_str = datetime.now(vn_tz).strftime("%Y-%m-%d")
+        nutri = load_json(NUTRITION_FILE, {})
+        if today_str not in nutri:
+            nutri[today_str] = {"consumed_calories": 0, "protein": 0, "carb": 0, "fat": 0, "logs": []}
+            
+        nutri[today_str]["consumed_calories"] += data["calories"]
+        nutri[today_str]["protein"] += data["protein"]
+        nutri[today_str]["carb"] += data["carb"]
+        nutri[today_str]["fat"] += data["fat"]
+        nutri[today_str]["logs"].append(f"{data['food_name']} ({data['calories']} kcal)")
+        save_json(NUTRITION_FILE, nutri)
+        
+        remaining = target - nutri[today_str]["consumed_calories"]
+        
+        msg = f"🍽️ <b>{data['food_name'].upper()}</b>\n\n"
+        msg += f"🔥 <b>Năng lượng:</b> {data['calories']} kcal\n"
+        msg += f"💪 <b>P/C/F (g):</b> {data['protein']} / {data['carb']} / {data['fat']}\n\n"
+        msg += f"💡 <i>{data['advice']}</i>\n\n"
+        msg += f"📉 <b>Tổng đã nạp hôm nay:</b> {nutri[today_str]['consumed_calories']} / {target} kcal\n"
+        msg += f"🎯 <b>Quỹ Calo còn lại:</b> {remaining} kcal"
+        
+        await context.bot.delete_message(chat_id=update.message.chat_id, message_id=status_msg.message_id)
+        await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        await context.bot.delete_message(chat_id=update.message.chat_id, message_id=status_msg.message_id)
+        await update.message.reply_text(f"Lỗi soi chiếu món ăn: {e}")
+
 # --- VOICE OS & CHATBOT ---
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Xử lý giọng nói bằng Gemini"""
@@ -426,11 +528,13 @@ def main():
     app.add_handler(CommandHandler("report", report_command))
     app.add_handler(CommandHandler("todo", todo_command))
     app.add_handler(CommandHandler("remind", remind_command))
+    app.add_handler(CommandHandler("healthsetup", healthsetup_command))
     app.add_handler(CommandHandler("tasks", tasks_command))
     app.add_handler(CommandHandler("push", manual_trigger))
     
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat_route))
 
     vn_tz = pytz.timezone('Asia/Ho_Chi_Minh')
