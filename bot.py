@@ -386,15 +386,20 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         Lưu ý: Nếu là LOẠI 2, hãy để food_data là null. Mục tiêu calo 1 ngày là {target} kcal."""
         
         import time as sys_time
-        try:
-            res = client.models.generate_content(model=GEMINI_MODEL, contents=[img, prompt]).text.strip()
-        except Exception as api_e:
-            if "500" in str(api_e) or "503" in str(api_e):
-                sys_time.sleep(2)
+        import random
+        max_retries = 4
+        res = None
+        for attempt in range(max_retries):
+            try:
                 res = client.models.generate_content(model=GEMINI_MODEL, contents=[img, prompt]).text.strip()
-            else:
-                raise api_e
-                
+                break
+            except Exception as api_e:
+                if ("500" in str(api_e) or "503" in str(api_e) or "429" in str(api_e)) and attempt < max_retries - 1:
+                    sleep_time = (2 ** attempt) + random.uniform(0, 1)
+                    sys_time.sleep(sleep_time)
+                else:
+                    raise api_e
+                    
         data = json.loads(res.replace("```json", "").replace("```", "").strip())
         
         if data.get("image_type") == "food" and data.get("food_data"):
@@ -628,14 +633,19 @@ async def handle_chat_text(update, context, text):
         
         # Thử gọi API, nếu gặp lỗi 500 (Google Server quá tải) thì tự động thử lại 1 lần
         import time as sys_time
-        try:
-            response = chat_session.send_message(prompt).text
-        except Exception as api_e:
-            if "500" in str(api_e):
-                sys_time.sleep(2) # Chờ 2s cho server Google thở
+        import random
+        max_retries = 4
+        response = None
+        for attempt in range(max_retries):
+            try:
                 response = chat_session.send_message(prompt).text
-            else:
-                raise api_e
+                break
+            except Exception as api_e:
+                if ("500" in str(api_e) or "503" in str(api_e) or "429" in str(api_e)) and attempt < max_retries - 1:
+                    sleep_time = (2 ** attempt) + random.uniform(0, 1)
+                    sys_time.sleep(sleep_time)
+                else:
+                    raise api_e
                 
         await update.message.reply_text(clean_for_telegram(response), parse_mode=ParseMode.HTML)
     except Exception as e:
