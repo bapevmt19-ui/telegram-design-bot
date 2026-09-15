@@ -37,6 +37,7 @@ IDEAS_FILE = "ideas.json"
 REMINDERS_FILE = "reminders.json"
 HEALTH_FILE = "health.json"
 NUTRITION_FILE = "nutrition.json"
+MEMORY_FILE = "memory.json"
 
 RSS_FEEDS_DESIGN = {"💡 UX/UI Design": "https://uxdesign.cc/feed", "🎨 Web Design": "https://www.smashingmagazine.com/feed/"}
 RSS_FEEDS_AI = {"🤖 AI News": "https://www.artificialintelligence-news.com/feed/"}
@@ -412,6 +413,68 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.delete_message(chat_id=update.message.chat_id, message_id=status_msg.message_id)
         await update.message.reply_text(f"⚠️ Lỗi nhận diện giọng nói: {e}")
 
+async def food_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = " ".join(context.args)
+    if not text:
+        await update.message.reply_text("🍽️ Sếp vui lòng nhập món ăn. VD: `/food 3 quả trứng luộc và 1 cốc sữa`", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    status_msg = await update.message.reply_text("🔍 <i>Đang soi món ăn và tính Calo...</i>", parse_mode=ParseMode.HTML)
+    try:
+        health = load_json(HEALTH_FILE, {})
+        target = health.get("target_calories", 2000)
+        
+        prompt = f"""Bạn là một chuyên gia dinh dưỡng. Người dùng vừa nhập thực đơn: "{text}".
+        Mục tiêu 1 ngày của người dùng là nạp {target} Calories.
+        Hãy ước lượng khẩu phần và tính toán.
+        Trả về ĐÚNG định dạng JSON sau (không chứa ký tự thừa):
+        {{"food_name": "Tóm tắt tên món", "calories": 500, "protein": 30, "carb": 40, "fat": 15, "advice": "Nhận xét ngắn gọn 1 câu xem món này có tốt cho mục tiêu không (kèm emoji)"}}"""
+        
+        res = client.models.generate_content(model=GEMINI_MODEL, contents=prompt).text.strip()
+        data = json.loads(res.replace("```json", "").replace("```", "").strip())
+        
+        vn_tz = pytz.timezone('Asia/Ho_Chi_Minh')
+        today_str = datetime.now(vn_tz).strftime("%Y-%m-%d")
+        nutri = load_json(NUTRITION_FILE, {})
+        if today_str not in nutri:
+            nutri[today_str] = {"consumed_calories": 0, "protein": 0, "carb": 0, "fat": 0, "logs": []}
+            
+        nutri[today_str]["consumed_calories"] += data["calories"]
+        nutri[today_str]["protein"] += data["protein"]
+        nutri[today_str]["carb"] += data["carb"]
+        nutri[today_str]["fat"] += data["fat"]
+        nutri[today_str]["logs"].append(f"{data['food_name']} ({data['calories']} kcal)")
+        save_json(NUTRITION_FILE, nutri)
+        
+        remaining = target - nutri[today_str]["consumed_calories"]
+        
+        msg = f"🍽️ <b>{data['food_name'].upper()}</b>\n\n"
+        msg += f"🔥 <b>Năng lượng:</b> {data['calories']} kcal\n"
+        msg += f"💪 <b>P/C/F (g):</b> {data['protein']} / {data['carb']} / {data['fat']}\n\n"
+        msg += f"💡 <i>{data['advice']}</i>\n\n"
+        msg += f"📉 <b>Tổng đã nạp hôm nay:</b> {nutri[today_str]['consumed_calories']} / {target} kcal\n"
+        msg += f"🎯 <b>Quỹ Calo còn lại:</b> {remaining} kcal"
+        
+        await context.bot.delete_message(chat_id=update.message.chat_id, message_id=status_msg.message_id)
+        await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        await context.bot.delete_message(chat_id=update.message.chat_id, message_id=status_msg.message_id)
+        await update.message.reply_text(f"Lỗi soi chiếu món ăn: {e}")
+
+async def learn_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = " ".join(context.args)
+    if not text:
+        await update.message.reply_text("🧠 Sếp muốn em nhớ điều gì? VD: `/learn Từ nay gọi tôi là Chủ Tịch`", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    try:
+        memory = load_json(MEMORY_FILE, {"rules": []})
+        memory["rules"].append(text)
+        save_json(MEMORY_FILE, memory)
+        await update.message.reply_text("🧠 Đã lưu vào bộ nhớ cốt lõi (Core Memory). Em sẽ luôn tuân thủ nguyên tắc này từ nay về sau!")
+    except Exception as e:
+        await update.message.reply_text(f"Lỗi: {e}")
+
 async def handle_chat_text(update, context, text):
     if "#idea" in text.lower():
         await execute_idea(update.message.chat_id, context, text.lower().replace("#idea", "").strip())
@@ -420,9 +483,26 @@ async def handle_chat_text(update, context, text):
     try:
         ideas = load_json(IDEAS_FILE, {"ideas": []})
         recent_ideas = "\n".join([f"- {i['text']}" for i in ideas.get("ideas", [])[-5:]])
-        ctx = f"GHI CHÚ HỆ THỐNG: Dưới đây là các ý tưởng sếp đã lưu gần đây:\n{recent_ideas}\n\n" if recent_ideas else ""
+        ctx = f"KHO Ý TƯỞNG CỦA NGƯỜI DÙNG:\n{recent_ideas}\n\n" if recent_ideas else ""
         
-        prompt = ctx + text + "\n\n(Lưu ý: Trả lời ngắn gọn, TUYỆT ĐỐI KHÔNG dùng dấu ** hay ### hay #. Chỉ dùng văn bản thuần và emoji)."
+        # Inject Nutrition Context
+        vn_tz = pytz.timezone('Asia/Ho_Chi_Minh')
+        today_str = datetime.now(vn_tz).strftime("%Y-%m-%d")
+        health = load_json(HEALTH_FILE, {})
+        nutri = load_json(NUTRITION_FILE, {}).get(today_str, {})
+        if health and nutri:
+            target = health.get('target_calories', 2000)
+            consumed = nutri.get('consumed_calories', 0)
+            logs = ", ".join(nutri.get('logs', []))
+            ctx += f"HỒ SƠ DINH DƯỠNG HÔM NAY ({today_str}): Mục tiêu {target} kcal. Đã nạp {consumed} kcal. Các món đã ăn: {logs}. Calo còn lại: {target - consumed} kcal.\n\n"
+            
+        # Inject Core Memory
+        memory = load_json(MEMORY_FILE, {"rules": []})
+        if memory.get("rules"):
+            rules_str = "\n".join([f"- {r}" for r in memory["rules"]])
+            ctx += f"BỘ NHỚ LÕI (CÁC NGUYÊN TẮC BẠN PHẢI TUÂN THỦ TỪ NGƯỜI DÙNG):\n{rules_str}\n\n"
+        
+        prompt = ctx + text + "\n\n(SYSTEM PROMPT TỐI CAO: Đóng vai một Quân sư cấp cao / Trợ lý tinh hoa. Suy nghĩ sâu sắc, lập luận đa chiều, đưa ra góc nhìn sắc bén và giải pháp đột phá. Không bao giờ nói chung chung hay sáo rỗng. Dài hay ngắn tuỳ vào mức độ phức tạp của câu hỏi, nhưng phải CHẤT LƯỢNG. KHÔNG dùng markdown # hay **, chỉ dùng thẻ <b>, <i> chuẩn HTML. Luôn xưng hô theo đúng luật trong Bộ Nhớ Lõi, nếu không có thì gọi là 'sếp' và xưng 'em')."
         response = chat_session.send_message(prompt).text
         await update.message.reply_text(clean_for_telegram(response), parse_mode=ParseMode.HTML)
     except Exception as e:
@@ -439,14 +519,33 @@ async def pitch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🦈 Sếp hãy nhập ý tưởng kinh doanh. VD: `/pitch Mở quán cafe kết hợp xem bài Tarot`", parse_mode=ParseMode.MARKDOWN)
         return
     
+    # Âm thầm lưu vào Second Brain (ideas.json)
+    try:
+        import time as sys_time
+        ideas = load_json(IDEAS_FILE, {"ideas": []})
+        ideas["ideas"].append({
+            "id": str(int(sys_time.time())),
+            "text": f"[Pitch Doanh nghiệp]: {text}",
+            "timestamp": datetime.now(pytz.timezone('Asia/Ho_Chi_Minh')).strftime("%Y-%m-%d %H:%M")
+        })
+        save_json(IDEAS_FILE, ideas)
+    except Exception as e:
+        logger.error(f"Lỗi lưu pitch: {e}")
+
     status_msg = await update.message.reply_text("🦈 <i>Shark Bot đang soi ý tưởng của sếp...</i>", parse_mode=ParseMode.HTML)
+    
+    memory_ctx = ""
+    memory = load_json(MEMORY_FILE, {"rules": []})
+    if memory.get("rules"):
+        memory_ctx = "\n\nTUÂN THỦ CÁC NGUYÊN TẮC SAU:\n" + "\n".join([f"- {r}" for r in memory["rules"]])
+        
     prompt = f"""Đóng vai một 'Shark' (Nhà đầu tư) khắt khe và thực tế trên Shark Tank. Người dùng vừa trình bày ý tưởng kinh doanh sau: "{text}".
     Hãy phản biện và cố vấn. Trình bày rõ ràng theo cấu trúc:
     1. 🩸 Điểm chết (Chỉ ra 1-2 rủi ro chí mạng nhất của mô hình này).
     2. 💡 Lối thoát (Gợi ý chiến lược Go-to-Market hoặc cách pivot để kiếm được tiền).
     3. 📚 Từ vựng thương trường (Liệt kê đúng 3 từ vựng Tiếng Anh chuyên ngành Kinh doanh/Khởi nghiệp đã được chèn khéo léo trong bài viết, kèm giải nghĩa ngắn).
     4. Đánh giá khả thi: X/10 điểm.
-    Lưu ý: Giọng điệu gai góc, sắc sảo, thực tế. KHÔNG dùng markdown # hay **, chỉ dùng văn bản thường và emoji. Sử dụng <b> cho in đậm, <i> cho in nghiêng nếu cần (chuẩn HTML)."""
+    Lưu ý: Giọng điệu gai góc, sắc sảo, thực tế. KHÔNG dùng markdown # hay **, chỉ dùng văn bản thường và emoji. Sử dụng <b> cho in đậm, <i> cho in nghiêng nếu cần (chuẩn HTML).{memory_ctx}"""
     
     try:
         res = client.models.generate_content(model=GEMINI_MODEL, contents=prompt).text
@@ -587,7 +686,9 @@ def main():
     app.add_handler(CommandHandler("todo", todo_command))
     app.add_handler(CommandHandler("remind", remind_command))
     app.add_handler(CommandHandler("healthsetup", healthsetup_command))
+    app.add_handler(CommandHandler("food", food_command))
     app.add_handler(CommandHandler("pitch", pitch_command))
+    app.add_handler(CommandHandler("learn", learn_command))
     app.add_handler(CommandHandler("tasks", tasks_command))
     app.add_handler(CommandHandler("push", manual_trigger))
     
