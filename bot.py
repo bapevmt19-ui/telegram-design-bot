@@ -85,17 +85,50 @@ async def execute_spend(chat_id, context, amount, reason):
         await context.bot.send_message(chat_id=chat_id, text="⚠️ Sếp chưa bấm nút xác nhận chia tiền vào hũ Timo đầu tháng!")
         return
 
-    finance["expenses"].append({"date": datetime.now().strftime("%Y-%m-%d"), "amount": amount, "reason": reason})
+    # Auto-categorize using Gemini based on existing budgets
+    category = "Khac"
+    if finance.get("budgets"):
+        budget_keys = list(finance["budgets"].keys())
+        prompt = f"""Phân loại chi tiêu: "{reason}". 
+        Hãy chọn 1 danh mục phù hợp nhất từ danh sách sau: {', '.join(budget_keys)}. 
+        Chỉ trả về ĐÚNG 1 từ là tên danh mục, không giải thích. Nếu không khớp cái nào, trả về Khac."""
+        try:
+            category = client.models.generate_content(model=GEMINI_MODEL, contents=prompt).text.strip()
+            if category not in budget_keys:
+                category = "Khac"
+        except:
+            category = "Khac"
+            
+    finance["expenses"].append({
+        "date": datetime.now(pytz.timezone('Asia/Ho_Chi_Minh')).strftime("%Y-%m-%d"), 
+        "amount": amount, 
+        "reason": reason,
+        "category": category
+    })
     save_json(FINANCE_FILE, finance)
     
-    current_month = datetime.now().strftime("%Y-%m")
-    month_expenses = [item["amount"] for item in finance["expenses"] if item["date"].startswith(current_month)]
-    total_spent = sum(month_expenses)
-    total_budget = sum(finance["budgets"].values()) if finance["budgets"] else finance["salary"]
-    remaining = total_budget - total_spent
+    current_month = datetime.now(pytz.timezone('Asia/Ho_Chi_Minh')).strftime("%Y-%m")
+    month_expenses = [item for item in finance["expenses"] if item["date"].startswith(current_month)]
     
-    msg = f"💸 <b>ĐÃ TRỪ TIỀN:</b>\n• Số tiền: {amount:,.0f} VNĐ\n• Mục đích: {reason}\n\n📊 <b>CÒN LẠI THÁNG NÀY:</b> {remaining:,.0f} VNĐ"
-    if remaining < 0: msg += "\n\n🚨 <b>BÁO ĐỘNG ĐỎ: SẾP ĐÃ TIÊU ÂM QUỸ THÁNG NÀY!</b>"
+    total_spent = sum(item["amount"] for item in month_expenses)
+    total_budget = sum(finance["budgets"].values()) if finance["budgets"] else finance["salary"]
+    global_remaining = total_budget - total_spent
+    
+    msg = f"💸 <b>ĐÃ TRỪ TIỀN:</b>\n▪️ Số tiền: {amount:,.0f} VNĐ\n▪️ Mục đích: {reason}\n▪️ Phân loại AI: <b>{category}</b>\n\n"
+    
+    # Check specific category budget
+    if category != "Khac" and category in finance["budgets"]:
+        cat_budget = finance["budgets"][category]
+        cat_spent = sum(item["amount"] for item in month_expenses if item.get("category") == category)
+        cat_remaining = cat_budget - cat_spent
+        msg += f"📦 <b>Quỹ {category}:</b> Còn lại {cat_remaining:,.0f} / {cat_budget:,.0f} VNĐ\n"
+        if cat_remaining < 0:
+            msg += f"🚨 <b>CẢNH BÁO: SẾP ĐÃ TIÊU ÂM QUỸ {category.upper()}!</b>\n\n"
+
+    msg += f"💰 <b>TỔNG TIỀN CÒN LẠI THÁNG NÀY:</b> {global_remaining:,.0f} VNĐ"
+    if global_remaining < 0: 
+        msg += "\n\n💀 <b>BÁO ĐỘNG ĐỎ: SẾP ĐÃ TIÊU ÂM TOÀN BỘ NGÂN SÁCH!</b>"
+        
     await context.bot.send_message(chat_id=chat_id, text=clean_for_telegram(msg), parse_mode=ParseMode.HTML)
 
 async def execute_todo(chat_id, context, task_text):
@@ -156,8 +189,8 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     categories = {}
     for exp in month_expenses:
-        # Nhóm theo từ đầu tiên (Ví dụ: "Ăn sáng" -> "Ăn")
-        cat = exp['reason'].split()[0].title()
+        # Nhóm theo phân loại AI, nếu không có thì lấy từ đầu tiên
+        cat = exp.get('category', exp['reason'].split()[0].title())
         categories[cat] = categories.get(cat, 0) + exp['amount']
         
     labels = list(categories.keys())
