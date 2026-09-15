@@ -354,52 +354,75 @@ async def healthsetup_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(f"Lỗi: Không nhận diện được dữ liệu. Sếp nhập lại rõ hơn nhé! ({e})")
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    status_msg = await update.message.reply_text("🔍 <i>Đang soi món ăn và tính Calo...</i>", parse_mode=ParseMode.HTML)
+    status_msg = await update.message.reply_text("👁️ <i>Đang soi hình ảnh...</i>", parse_mode=ParseMode.HTML)
     try:
         photo_file = await update.message.photo[-1].get_file()
-        file_path = "temp_food.jpg"
+        file_path = "temp_photo.jpg"
         await photo_file.download_to_drive(file_path)
         
         health = load_json(HEALTH_FILE, {})
         target = health.get("target_calories", 2000)
         
+        # Lấy Core Memory để prompt phân tích chung sắc bén hơn
+        memory = load_json(MEMORY_FILE, {"rules": []})
+        memory_ctx = "\n".join([f"- {r}" for r in memory["rules"]]) if memory.get("rules") else "Không có."
+        
+        # Check if caption exists to give context to screenshot
+        caption = update.message.caption or ""
+        
         img = client.files.upload(file=file_path)
-        prompt = f"""Bạn là một chuyên gia dinh dưỡng. Người dùng vừa tải lên hình ảnh bữa ăn, đồ ăn, hoặc cái cân.
-        Mục tiêu 1 ngày của người dùng là nạp {target} Calories.
-        Hãy ước lượng khẩu phần và tính toán.
-        Trả về ĐÚNG định dạng JSON sau (không chứa ký tự thừa):
-        {{"food_name": "Tên món ăn (hoặc Cân nặng nếu là ảnh cái cân)", "calories": 500, "protein": 30, "carb": 40, "fat": 15, "advice": "Nhận xét ngắn gọn 1 câu xem món này có tốt cho mục tiêu không (kèm emoji)"}}"""
+        prompt = f"""Phân tích hình ảnh này. Hình ảnh có thể là 1 trong 2 loại:
+        LOẠI 1: Ảnh đồ ăn/thức uống/cái cân. -> Bạn đóng vai chuyên gia dinh dưỡng, ước lượng calo.
+        LOẠI 2: Ảnh chụp màn hình bài viết (Facebook, báo chí), biểu đồ, tài liệu, v.v. -> Bạn đóng vai Quân sư chiến lược. Đọc nội dung trong ảnh và phân tích sâu sắc, đa chiều (kết hợp với yêu cầu thêm của người dùng nếu có: '{caption}').
+        
+        TRẢ VỀ ĐÚNG ĐỊNH DẠNG JSON DUY NHẤT DƯỚI ĐÂY (không bọc trong thẻ markdown):
+        {{
+            "image_type": "food" hoặc "general",
+            "food_data": {{
+                "food_name": "Tên món", "calories": 500, "protein": 30, "carb": 40, "fat": 15, "advice": "Nhận xét 1 câu"
+            }},
+            "general_response": "Bài phân tích chi tiết, sâu sắc (dùng thẻ <b>, <i> chuẩn HTML, tuyệt đối không dùng markdown # hay **). Luôn tuân thủ luật bộ nhớ lõi: {memory_ctx}"
+        }}
+        Lưu ý: Nếu là LOẠI 2, hãy để food_data là null. Mục tiêu calo 1 ngày là {target} kcal."""
         
         res = client.models.generate_content(model=GEMINI_MODEL, contents=[img, prompt]).text.strip()
         data = json.loads(res.replace("```json", "").replace("```", "").strip())
         
-        vn_tz = pytz.timezone('Asia/Ho_Chi_Minh')
-        today_str = datetime.now(vn_tz).strftime("%Y-%m-%d")
-        nutri = load_json(NUTRITION_FILE, {})
-        if today_str not in nutri:
-            nutri[today_str] = {"consumed_calories": 0, "protein": 0, "carb": 0, "fat": 0, "logs": []}
+        if data.get("image_type") == "food" and data.get("food_data"):
+            food = data["food_data"]
+            vn_tz = pytz.timezone('Asia/Ho_Chi_Minh')
+            today_str = datetime.now(vn_tz).strftime("%Y-%m-%d")
+            nutri = load_json(NUTRITION_FILE, {})
+            if today_str not in nutri:
+                nutri[today_str] = {"consumed_calories": 0, "protein": 0, "carb": 0, "fat": 0, "logs": []}
+                
+            nutri[today_str]["consumed_calories"] += food["calories"]
+            nutri[today_str]["protein"] += food["protein"]
+            nutri[today_str]["carb"] += food["carb"]
+            nutri[today_str]["fat"] += food["fat"]
+            nutri[today_str]["logs"].append(f"{food['food_name']} ({food['calories']} kcal)")
+            save_json(NUTRITION_FILE, nutri)
             
-        nutri[today_str]["consumed_calories"] += data["calories"]
-        nutri[today_str]["protein"] += data["protein"]
-        nutri[today_str]["carb"] += data["carb"]
-        nutri[today_str]["fat"] += data["fat"]
-        nutri[today_str]["logs"].append(f"{data['food_name']} ({data['calories']} kcal)")
-        save_json(NUTRITION_FILE, nutri)
-        
-        remaining = target - nutri[today_str]["consumed_calories"]
-        
-        msg = f"🍽️ <b>{data['food_name'].upper()}</b>\n\n"
-        msg += f"🔥 <b>Năng lượng:</b> {data['calories']} kcal\n"
-        msg += f"💪 <b>P/C/F (g):</b> {data['protein']} / {data['carb']} / {data['fat']}\n\n"
-        msg += f"💡 <i>{data['advice']}</i>\n\n"
-        msg += f"📉 <b>Tổng đã nạp hôm nay:</b> {nutri[today_str]['consumed_calories']} / {target} kcal\n"
-        msg += f"🎯 <b>Quỹ Calo còn lại:</b> {remaining} kcal"
-        
-        await context.bot.delete_message(chat_id=update.message.chat_id, message_id=status_msg.message_id)
-        await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
+            remaining = target - nutri[today_str]["consumed_calories"]
+            
+            msg = f"🍽️ <b>{food['food_name'].upper()}</b>\n\n"
+            msg += f"🔥 <b>Năng lượng:</b> {food['calories']} kcal\n"
+            msg += f"💪 <b>P/C/F (g):</b> {food['protein']} / {food['carb']} / {food['fat']}\n\n"
+            msg += f"💡 <i>{food['advice']}</i>\n\n"
+            msg += f"📉 <b>Tổng đã nạp hôm nay:</b> {nutri[today_str]['consumed_calories']} / {target} kcal\n"
+            msg += f"🎯 <b>Quỹ Calo còn lại:</b> {remaining} kcal"
+            
+            await context.bot.delete_message(chat_id=update.message.chat_id, message_id=status_msg.message_id)
+            await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
+            
+        else:
+            # General image
+            await context.bot.delete_message(chat_id=update.message.chat_id, message_id=status_msg.message_id)
+            await update.message.reply_text(clean_for_telegram(data.get("general_response", "Không thể trích xuất nội dung.")), parse_mode=ParseMode.HTML)
+            
     except Exception as e:
         await context.bot.delete_message(chat_id=update.message.chat_id, message_id=status_msg.message_id)
-        await update.message.reply_text(f"Lỗi soi chiếu món ăn: {e}")
+        await update.message.reply_text(f"⚠️ Lỗi phân tích ảnh: {e}")
 
 # --- VOICE OS & CHATBOT ---
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -445,6 +468,43 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await context.bot.delete_message(chat_id=update.message.chat_id, message_id=status_msg.message_id)
         await update.message.reply_text(f"⚠️ Lỗi nhận diện giọng nói: {e}")
+
+async def cook_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = " ".join(context.args)
+    if not text:
+        await update.message.reply_text("🧑‍🍳 Sếp vui lòng nhập nguyên liệu hiện có. VD: `/cook 3 lạng thịt bò, cà chua, hành tây`", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    status_msg = await update.message.reply_text("🧑‍🍳 <i>Đang lục lọi tủ lạnh và sáng tạo công thức...</i>", parse_mode=ParseMode.HTML)
+    try:
+        vn_tz = pytz.timezone('Asia/Ho_Chi_Minh')
+        today_str = datetime.now(vn_tz).strftime("%Y-%m-%d")
+        health = load_json(HEALTH_FILE, {})
+        nutri = load_json(NUTRITION_FILE, {}).get(today_str, {})
+        
+        target = health.get("target_calories", 2000)
+        consumed = nutri.get("consumed_calories", 0)
+        remaining = target - consumed
+        
+        prompt = f"""Đóng vai một Siêu đầu bếp và Chuyên gia dinh dưỡng. Người dùng đang có các nguyên liệu sau: "{text}".
+        Quỹ Calo còn lại trong ngày của họ là: {remaining} kcal.
+        Hãy sáng tạo ra 1 món ăn NGON, dễ làm, và TỐI ƯU cho quỹ calo còn lại (không được vượt quá).
+        
+        Trình bày ĐẸP, NGẮN GỌN bằng HTML (sử dụng <b>, <i>, không dùng markdown # hay **):
+        🍲 <b>TÊN MÓN ĂN</b> (Kèm mô tả sự hấp dẫn 1 câu)
+        
+        🛒 <b>Nguyên liệu cần dùng:</b> (Liệt kê định lượng)
+        🔥 <b>Cách chế biến:</b> (3-4 bước cực kỳ ngắn gọn, dễ hiểu)
+        
+        📊 <b>Macro dự kiến:</b> Calories / Protein / Carb / Fat
+        💡 <b>Mẹo đầu bếp:</b> (1 mẹo nhỏ để món ăn ngon hơn hoặc healthy hơn)"""
+        
+        res = client.models.generate_content(model=GEMINI_MODEL, contents=prompt).text
+        await context.bot.delete_message(chat_id=update.message.chat_id, message_id=status_msg.message_id)
+        await update.message.reply_text(clean_for_telegram(res), parse_mode=ParseMode.HTML)
+    except Exception as e:
+        await context.bot.delete_message(chat_id=update.message.chat_id, message_id=status_msg.message_id)
+        await update.message.reply_text(f"Lỗi nhà bếp: {e}")
 
 async def food_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = " ".join(context.args)
@@ -528,6 +588,26 @@ async def handle_chat_text(update, context, text):
             consumed = nutri.get('consumed_calories', 0)
             logs = ", ".join(nutri.get('logs', []))
             ctx += f"HỒ SƠ DINH DƯỠNG HÔM NAY ({today_str}): Mục tiêu {target} kcal. Đã nạp {consumed} kcal. Các món đã ăn: {logs}. Calo còn lại: {target - consumed} kcal.\n\n"
+            
+        # Tự động đọc Link (URL) nếu có
+        url_match = re.search(r'(https?://[^\s]+)', text)
+        if url_match:
+            url = url_match.group(0)
+            status_msg = await update.message.reply_text("🌐 <i>Đang cắm cáp truy cập link sếp gửi...</i>", parse_mode=ParseMode.HTML)
+            try:
+                import trafilatura
+                downloaded = trafilatura.fetch_url(url)
+                if downloaded:
+                    extracted = trafilatura.extract(downloaded)
+                    if extracted:
+                        ctx += f"NỘI DUNG BÀI VIẾT TỪ LINK MÀ NGƯỜI DÙNG VỪA GỬI ({url}):\n{extracted[:6000]}\n\n"
+                    else:
+                        ctx += f"HỆ THỐNG GHI CHÚ: Trang web ({url}) này chặn bot hoặc yêu cầu đăng nhập (như Facebook/Tiktok). Hãy báo cho người dùng biết bạn không thể đọc được bài viết này.\n\n"
+                else:
+                    ctx += f"HỆ THỐNG GHI CHÚ: Trang web ({url}) từ chối kết nối. Hãy báo cho người dùng biết.\n\n"
+            except Exception as e:
+                pass
+            await context.bot.delete_message(chat_id=update.message.chat_id, message_id=status_msg.message_id)
             
         # Inject Core Memory
         memory = load_json(MEMORY_FILE, {"rules": []})
@@ -720,6 +800,7 @@ def main():
     app.add_handler(CommandHandler("remind", remind_command))
     app.add_handler(CommandHandler("healthsetup", healthsetup_command))
     app.add_handler(CommandHandler("food", food_command))
+    app.add_handler(CommandHandler("cook", cook_command))
     app.add_handler(CommandHandler("pitch", pitch_command))
     app.add_handler(CommandHandler("learn", learn_command))
     app.add_handler(CommandHandler("tasks", tasks_command))
