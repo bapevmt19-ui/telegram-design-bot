@@ -391,7 +391,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         res = None
         for attempt in range(max_retries):
             try:
-                res = client.models.generate_content(model=GEMINI_MODEL, contents=[img, prompt]).text.strip()
+                if attempt >= 2:
+                    res = client.models.generate_content(model="gemini-flash-lite-latest", contents=[img, prompt]).text.strip()
+                else:
+                    res = client.models.generate_content(model=GEMINI_MODEL, contents=[img, prompt]).text.strip()
                 break
             except Exception as api_e:
                 if ("500" in str(api_e) or "503" in str(api_e) or "429" in str(api_e)) and attempt < max_retries - 1:
@@ -638,7 +641,14 @@ async def handle_chat_text(update, context, text):
         response = None
         for attempt in range(max_retries):
             try:
-                response = chat_session.send_message(prompt).text
+                # Nếu đã fail 2 lần (attempt >= 2), dùng mô hình dự phòng (Lite)
+                if attempt >= 2:
+                    response = client.models.generate_content(
+                        model="gemini-flash-lite-latest",
+                        contents=prompt
+                    ).text
+                else:
+                    response = chat_session.send_message(prompt).text
                 break
             except Exception as api_e:
                 if ("500" in str(api_e) or "503" in str(api_e) or "429" in str(api_e)) and attempt < max_retries - 1:
