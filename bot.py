@@ -616,10 +616,21 @@ async def handle_chat_text(update, context, text):
             ctx += f"BỘ NHỚ LÕI (CÁC NGUYÊN TẮC BẠN PHẢI TUÂN THỦ TỪ NGƯỜI DÙNG):\n{rules_str}\n\n"
         
         prompt = ctx + text + "\n\n(SYSTEM PROMPT TỐI CAO: Đóng vai một Quân sư cấp cao / Trợ lý tinh hoa. Suy nghĩ sâu sắc, lập luận đa chiều, đưa ra góc nhìn sắc bén và giải pháp đột phá. Không bao giờ nói chung chung hay sáo rỗng. Dài hay ngắn tuỳ vào mức độ phức tạp của câu hỏi, nhưng phải CHẤT LƯỢNG. KHÔNG dùng markdown # hay **, chỉ dùng thẻ <b>, <i> chuẩn HTML. Luôn xưng hô theo đúng luật trong Bộ Nhớ Lõi, nếu không có thì gọi là 'sếp' và xưng 'em')."
-        response = chat_session.send_message(prompt).text
+        
+        # Thử gọi API, nếu gặp lỗi 500 (Google Server quá tải) thì tự động thử lại 1 lần
+        import time as sys_time
+        try:
+            response = chat_session.send_message(prompt).text
+        except Exception as api_e:
+            if "500" in str(api_e):
+                sys_time.sleep(2) # Chờ 2s cho server Google thở
+                response = chat_session.send_message(prompt).text
+            else:
+                raise api_e
+                
         await update.message.reply_text(clean_for_telegram(response), parse_mode=ParseMode.HTML)
     except Exception as e:
-        await update.message.reply_text(f"Lỗi: {e}")
+        await update.message.reply_text(f"⚠️ Lỗi Server AI: {e}")
 
 async def handle_chat_route(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await handle_chat_text(update, context, update.message.text)
