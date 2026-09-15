@@ -432,6 +432,44 @@ async def handle_chat_route(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await handle_chat_text(update, context, update.message.text)
 
 
+# --- MENTOR-OS (BUSINESS & ENGLISH) ---
+async def pitch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = " ".join(context.args)
+    if not text:
+        await update.message.reply_text("🦈 Sếp hãy nhập ý tưởng kinh doanh. VD: `/pitch Mở quán cafe kết hợp xem bài Tarot`", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    status_msg = await update.message.reply_text("🦈 <i>Shark Bot đang soi ý tưởng của sếp...</i>", parse_mode=ParseMode.HTML)
+    prompt = f"""Đóng vai một 'Shark' (Nhà đầu tư) khắt khe và thực tế trên Shark Tank. Người dùng vừa trình bày ý tưởng kinh doanh sau: "{text}".
+    Hãy phản biện và cố vấn. Trình bày rõ ràng theo cấu trúc:
+    1. 🩸 Điểm chết (Chỉ ra 1-2 rủi ro chí mạng nhất của mô hình này).
+    2. 💡 Lối thoát (Gợi ý chiến lược Go-to-Market hoặc cách pivot để kiếm được tiền).
+    3. 📚 Từ vựng thương trường (Liệt kê đúng 3 từ vựng Tiếng Anh chuyên ngành Kinh doanh/Khởi nghiệp đã được chèn khéo léo trong bài viết, kèm giải nghĩa ngắn).
+    4. Đánh giá khả thi: X/10 điểm.
+    Lưu ý: Giọng điệu gai góc, sắc sảo, thực tế. KHÔNG dùng markdown # hay **, chỉ dùng văn bản thường và emoji. Sử dụng <b> cho in đậm, <i> cho in nghiêng nếu cần (chuẩn HTML)."""
+    
+    try:
+        res = client.models.generate_content(model=GEMINI_MODEL, contents=prompt).text
+        await context.bot.delete_message(chat_id=update.message.chat_id, message_id=status_msg.message_id)
+        await update.message.reply_text(clean_for_telegram(res), parse_mode=ParseMode.HTML)
+    except Exception as e:
+        await context.bot.delete_message(chat_id=update.message.chat_id, message_id=status_msg.message_id)
+        await update.message.reply_text(f"Lỗi hệ thống Shark: {e}")
+
+async def send_business_cheat(context: ContextTypes.DEFAULT_TYPE):
+    prompt = """Đóng vai một chuyên gia kinh doanh và ngôn ngữ. Hãy chia sẻ 1 'Business Cheat' (mẹo kinh doanh, đòn bẩy tài chính, tâm lý học hành vi, chiến lược giá...) cực kỳ thực chiến.
+    Cấu trúc:
+    1. 🧠 Tên chiến thuật (Tên tiếng Việt + Tiếng Anh).
+    2. 🎯 Bản chất & Ứng dụng (Giải thích thật ngắn gọn, sắc bén kèm 1 ví dụ thực tế nổi tiếng).
+    3. 📚 English Cheat Sheet (Rút ra 3 từ vựng Tiếng Anh chuyên ngành kinh doanh xuất hiện trong bài, giải nghĩa ngắn).
+    Không dùng markdown # hay **, chỉ dùng thẻ <b> hoặc <i>."""
+    try:
+        res = client.models.generate_content(model=GEMINI_MODEL, contents=prompt).text
+        msg = f"🍱 <b>BỮA TRƯA DOANH NHÂN</b>\n\n{clean_for_telegram(res)}"
+        await context.bot.send_message(chat_id=CHAT_ID_BOOKS, text=msg, parse_mode=ParseMode.HTML) # Gửi vào kênh Sách/Mindset
+    except Exception as e:
+        logger.error(f"Lỗi gửi Business Cheat: {e}")
+
 # --- TIN TỨC & SÁCH (CHANNELS) ---
 async def send_news_to_channel(context: ContextTypes.DEFAULT_TYPE):
     vn_tz = pytz.timezone('Asia/Ho_Chi_Minh')
@@ -479,6 +517,7 @@ async def send_book_to_channel(context: ContextTypes.DEFAULT_TYPE):
 async def manual_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Đang đẩy bài test ra các kênh...")
     await send_news_to_channel(context)
+    await send_business_cheat(context)
     await send_book_to_channel(context)
 
 # --- DUMMY SERVER RENDER ---
@@ -529,6 +568,7 @@ def main():
     app.add_handler(CommandHandler("todo", todo_command))
     app.add_handler(CommandHandler("remind", remind_command))
     app.add_handler(CommandHandler("healthsetup", healthsetup_command))
+    app.add_handler(CommandHandler("pitch", pitch_command))
     app.add_handler(CommandHandler("tasks", tasks_command))
     app.add_handler(CommandHandler("push", manual_trigger))
     
@@ -539,6 +579,7 @@ def main():
 
     vn_tz = pytz.timezone('Asia/Ho_Chi_Minh')
     app.job_queue.run_daily(send_news_to_channel, time=time(hour=7, minute=0, tzinfo=vn_tz))
+    app.job_queue.run_daily(send_business_cheat, time=time(hour=12, minute=0, tzinfo=vn_tz))
     app.job_queue.run_daily(send_book_to_channel, time=time(hour=20, minute=0, tzinfo=vn_tz)) 
     
     load_pending_reminders(app.job_queue)
