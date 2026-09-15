@@ -385,7 +385,16 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }}
         Lưu ý: Nếu là LOẠI 2, hãy để food_data là null. Mục tiêu calo 1 ngày là {target} kcal."""
         
-        res = client.models.generate_content(model=GEMINI_MODEL, contents=[img, prompt]).text.strip()
+        import time as sys_time
+        try:
+            res = client.models.generate_content(model=GEMINI_MODEL, contents=[img, prompt]).text.strip()
+        except Exception as api_e:
+            if "500" in str(api_e) or "503" in str(api_e):
+                sys_time.sleep(2)
+                res = client.models.generate_content(model=GEMINI_MODEL, contents=[img, prompt]).text.strip()
+            else:
+                raise api_e
+                
         data = json.loads(res.replace("```json", "").replace("```", "").strip())
         
         if data.get("image_type") == "food" and data.get("food_data"):
