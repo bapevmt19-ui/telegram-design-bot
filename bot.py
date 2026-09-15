@@ -456,17 +456,36 @@ async def pitch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.delete_message(chat_id=update.message.chat_id, message_id=status_msg.message_id)
         await update.message.reply_text(f"Lỗi hệ thống Shark: {e}")
 
+from gtts import gTTS
+
 async def send_business_cheat(context: ContextTypes.DEFAULT_TYPE):
-    prompt = """Đóng vai một chuyên gia kinh doanh và ngôn ngữ. Hãy chia sẻ 1 'Business Cheat' (mẹo kinh doanh, đòn bẩy tài chính, tâm lý học hành vi, chiến lược giá...) cực kỳ thực chiến.
+    prompt = """Đóng vai một chuyên gia kinh doanh và ngôn ngữ. Hãy chia sẻ 1 'Business Cheat' cực kỳ thực chiến.
     Cấu trúc:
     1. 🧠 Tên chiến thuật (Tên tiếng Việt + Tiếng Anh).
-    2. 🎯 Bản chất & Ứng dụng (Giải thích thật ngắn gọn, sắc bén kèm 1 ví dụ thực tế nổi tiếng).
-    3. 📚 English Cheat Sheet (Rút ra 3 từ vựng Tiếng Anh chuyên ngành kinh doanh xuất hiện trong bài, giải nghĩa ngắn).
-    Không dùng markdown # hay **, chỉ dùng thẻ <b> hoặc <i>."""
+    2. 🎯 Bản chất & Ứng dụng (Giải thích thật ngắn gọn, sắc bén kèm ví dụ).
+    3. 📚 English Cheat Sheet (3 từ vựng chuyên ngành. VỚI MỖI TỪ: Cung cấp Phiên âm quốc tế IPA + Cách đọc bồi tiếng Việt cho dễ đọc).
+    Không dùng markdown # hay **, chỉ dùng thẻ <b> hoặc <i>.
+    QUAN TRỌNG: Dòng cuối cùng của kết quả PHẢI ghi đúng cú pháp sau để hệ thống tạo giọng đọc chuẩn bản xứ:
+    AUDIO_VOCAB|từ vựng 1, từ vựng 2, từ vựng 3"""
     try:
         res = client.models.generate_content(model=GEMINI_MODEL, contents=prompt).text
-        msg = f"🍱 <b>BỮA TRƯA DOANH NHÂN</b>\n\n{clean_for_telegram(res)}"
-        await context.bot.send_message(chat_id=CHAT_ID_BOOKS, text=msg, parse_mode=ParseMode.HTML) # Gửi vào kênh Sách/Mindset
+        
+        text_parts = []
+        vocab_for_audio = ""
+        for line in res.split('\n'):
+            if line.startswith("AUDIO_VOCAB|"):
+                vocab_for_audio = line.split("|")[1]
+            else:
+                text_parts.append(line)
+                
+        msg = f"🍱 <b>BỮA TRƯA DOANH NHÂN</b>\n\n{clean_for_telegram('\n'.join(text_parts))}"
+        await context.bot.send_message(chat_id=CHAT_ID_BOOKS, text=msg, parse_mode=ParseMode.HTML)
+        
+        if vocab_for_audio:
+            tts = gTTS(text=vocab_for_audio, lang='en')
+            tts.save("vocab.mp3")
+            await context.bot.send_voice(chat_id=CHAT_ID_BOOKS, voice=open("vocab.mp3", "rb"))
+            
     except Exception as e:
         logger.error(f"Lỗi gửi Business Cheat: {e}")
 
