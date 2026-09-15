@@ -30,7 +30,7 @@ CHAT_ID_PRIVATE = os.getenv("TELEGRAM_CHAT_ID")
 CHAT_ID_BOOKS = "-1004324433124" 
 CHAT_ID_NEWS = "-1004430444714" 
 
-GEMINI_MODEL = "gemini-3.5-flash-lite"
+GEMINI_MODEL = "gemini-flash-latest"
 FINANCE_FILE = "finance.json"
 TODO_FILE = "todos.json"
 IDEAS_FILE = "ideas.json"
