@@ -281,7 +281,7 @@ async def healthsetup_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     Ghi chú activity_level: 1.2 (ít vận động), 1.375 (nhẹ), 1.55 (vừa), 1.725 (nặng), 1.9 (rất nặng). Goal: loss (giảm), gain (tăng), maintain (giữ)."""
     
     try:
-        res = client.models.generate_content(model="gemini-1.5-flash", contents=prompt).text
+        res = client.models.generate_content(model=GEMINI_MODEL, contents=prompt).text
         data = json.loads(res.replace("```json", "").replace("```", "").strip())
         
         if data['gender'] == 'male':
@@ -336,7 +336,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         Trả về ĐÚNG định dạng JSON sau (không chứa ký tự thừa):
         {{"food_name": "Tên món ăn (hoặc Cân nặng nếu là ảnh cái cân)", "calories": 500, "protein": 30, "carb": 40, "fat": 15, "advice": "Nhận xét ngắn gọn 1 câu xem món này có tốt cho mục tiêu không (kèm emoji)"}}"""
         
-        res = client.models.generate_content(model="gemini-1.5-flash", contents=[img, prompt]).text.strip()
+        res = client.models.generate_content(model=GEMINI_MODEL, contents=[img, prompt]).text.strip()
         data = json.loads(res.replace("```json", "").replace("```", "").strip())
         
         vn_tz = pytz.timezone('Asia/Ho_Chi_Minh')
@@ -388,7 +388,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         4. Lưu ý tưởng: IDEA|<nội_dung_ý_tưởng>
         5. Hỏi đáp: CHAT|<câu_hỏi_của_người_dùng>"""
         
-        res = client.models.generate_content(model="gemini-1.5-flash", contents=[audio, prompt]).text.strip()
+        res = client.models.generate_content(model=GEMINI_MODEL, contents=[audio, prompt]).text.strip()
         await context.bot.delete_message(chat_id=update.message.chat_id, message_id=status_msg.message_id)
         
         if res.startswith("SPEND|"):
