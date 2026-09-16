@@ -22,7 +22,7 @@ if not GEMINI_API_KEY or not TELEGRAM_BOT_TOKEN:
     )
 
 GEMINI_MODEL = "gemini-flash-latest"
-MODEL_PRO = "gemini-2.5-pro"
+MODEL_PRO = "gemini-3.1-pro-preview"
 
 # Giữ nguyên tên file ở thư mục gốc như bản cũ để không cần di chuyển
 # dữ liệu hiện có khi nâng cấp lên bản refactor này.
@@ -42,3 +42,4 @@ RSS_FEEDS_AI = {"🤖 AI News": "https://www.artificialintelligence-news.com/fee
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("lifeos_bot")
+
