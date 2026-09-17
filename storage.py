@@ -135,9 +135,22 @@ class _PgBackend:
                         "jsonb", encoder=json.dumps, decoder=json.loads, schema="pg_catalog"
                     )
 
-                ssl_mode = None if DB_SSL == "disable" else DB_SSL
+                # BUG FIX (17/9, lần 4): NGUYÊN NHÂN THẬT của lỗi
+                # "... does not appear to be an IPv4 or IPv6 address"
+                # -- KHÔNG liên quan gì đến IPv4/IPv6 hay loại pooler
+                # (đã loại trừ: sếp đổi cả Transaction lẫn Session
+                # pooler, lỗi vẫn y hệt). Nguyên nhân thật: asyncpg
+                # KHÔNG hỗ trợ ổn định việc truyền chuỗi kiểu
+                # "require"/"disable" (giống sslmode của libpq/
+                # psycopg2) vào tham số `ssl=` của create_pool() --
+                # đây là điều em đã hiểu sai, truyền nhầm chuỗi "require"
+                # vào đó khiến asyncpg xử lý sai và ném ra đúng lỗi lạ
+                # này. asyncpg chỉ đảm bảo hỗ trợ ổn định True/False/
+                # None hoặc 1 ssl.SSLContext -- chuyển sang dùng
+                # True/False cho chắc chắn.
+                ssl_param = False if DB_SSL == "disable" else True
                 pool = await asyncpg.create_pool(
-                    DATABASE_URL, min_size=1, max_size=5, init=_register_jsonb, ssl=ssl_mode
+                    DATABASE_URL, min_size=1, max_size=5, init=_register_jsonb, ssl=ssl_param
                 )
                 async with pool.acquire() as conn:
                     await conn.execute(
@@ -149,7 +162,9 @@ class _PgBackend:
                         """
                     )
                 cls._pool = pool
-                logger.info("Đã kết nối Postgres (%s) — dữ liệu sẽ bền vững qua các lần redeploy.", "SSL=" + str(ssl_mode))
+                logger.info(
+                    "Đã kết nối Postgres (SSL=%s) — dữ liệu sẽ bền vững qua các lần redeploy.", ssl_param
+                )
         return cls._pool
 
 
