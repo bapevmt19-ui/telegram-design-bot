@@ -52,7 +52,18 @@ def call_gemini_robust(client_instance, prompt, model=GEMINI_MODEL, is_json=Fals
             return res
         except Exception as api_e:
             err_str = str(api_e)
-            if "500" in err_str or "503" in err_str or "429" in err_str:
+            # BUG FIX (17/9, lần 5): thêm "404" vào điều kiện fallback.
+            # Trước đây chỉ bắt 429/500/503 -- khi Google ngừng cấp 1
+            # model cụ thể (như gemini-2.5-pro vừa bị khai tử), lỗi trả
+            # về là 404 NOT_FOUND, KHÔNG rơi vào nhánh retry/fallback
+            # này -> mọi lệnh dùng model đó (VD /deep, /pitch dùng
+            # MODEL_PRO) lập tức báo lỗi thẳng cho sếp dù bot vẫn còn
+            # model khác dùng được. Giữ NGUYÊN thứ tự cascade gốc
+            # (model chỉ định -> gemini-flash-latest ->
+            # gemini-flash-lite-latest), chỉ mở rộng thêm điều kiện
+            # kích hoạt để bot tự chống chịu khi Google đổi/khai tử
+            # model trong tương lai.
+            if "500" in err_str or "503" in err_str or "429" in err_str or "404" in err_str:
                 if attempt < max_retries - 1:
                     sys_time.sleep(1)  # Fast switch to fallback model
                     continue

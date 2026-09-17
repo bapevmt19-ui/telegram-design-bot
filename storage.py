@@ -39,6 +39,7 @@ import tempfile
 from typing import Any, Callable
 
 from config import (
+    CONTENT_HISTORY_FILE,
     DATABASE_URL,
     DB_SSL,
     FINANCE_FILE,
@@ -233,6 +234,11 @@ reminders_store = _make_store("reminders", REMINDERS_FILE, lambda: {"reminders":
 health_store = _make_store("health", HEALTH_FILE, lambda: {})
 nutrition_store = _make_store("nutrition", NUTRITION_FILE, lambda: {})
 memory_store = _make_store("memory", MEMORY_FILE, lambda: {"rules": []})
+# BUG FIX (17/9, lần 6): lưu lịch sử chủ đề/sách đã gửi ở kênh
+# broadcast, để jobs.py né lặp lại nội dung -- xem jobs.py.
+content_history_store = _make_store(
+    "content_history", CONTENT_HISTORY_FILE, lambda: {"cheat_topics": [], "book_titles": []}
+)
 
 # (key, file_path cũ, default_factory) — dùng cho migrate 1 lần bên dưới.
 _ALL_STORES_META = [
@@ -243,6 +249,7 @@ _ALL_STORES_META = [
     ("health", HEALTH_FILE, lambda: {}),
     ("nutrition", NUTRITION_FILE, lambda: {}),
     ("memory", MEMORY_FILE, lambda: {"rules": []}),
+    ("content_history", CONTENT_HISTORY_FILE, lambda: {"cheat_topics": [], "book_titles": []}),
 ]
 
 

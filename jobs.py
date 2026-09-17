@@ -14,29 +14,71 @@ from telegram.ext import ContextTypes
 
 from ai_client import call_gemini_async, clean_for_telegram, telegraph_client
 from config import CHAT_ID_BOOKS, CHAT_ID_NEWS, RSS_FEEDS_AI, RSS_FEEDS_DESIGN
+from storage import content_history_store
 from telegram_helpers import send_chunked_message, unique_temp_path
 
 logger = logging.getLogger(__name__)
 VN_TZ = pytz.timezone("Asia/Ho_Chi_Minh")
 
+# BUG FIX (17/9, lần 6): trước đây send_business_cheat và
+# send_book_to_channel gọi Gemini với prompt Y HỆT mỗi ngày, không hề
+# biết các ngày trước đã gửi chủ đề/cuốn sách gì -- Gemini không có
+# ký ức giữa các lần gọi API riêng biệt, nên dễ lặp lại nội dung sau
+# một thời gian (sếp phản ánh "gửi bài viết giống nhau quá"). Giải
+# pháp: lưu lại "lịch sử" các chủ đề/sách đã gửi (content_history_store),
+# rồi CHÈN VÀO PROMPT lần sau để chủ động nhắc Gemini né những cái đã
+# dùng -- đây là cách thực tế nhất để giảm lặp khi mỗi lần gọi API là
+# một phiên độc lập, không có bộ nhớ hội thoại.
+HISTORY_KEEP = 30
+
+
+async def _get_recent_history(list_key: str) -> list:
+    history = await content_history_store.read()
+    return history.get(list_key, [])[-HISTORY_KEEP:]
+
+
+async def _append_history(list_key: str, item: str):
+    if not item:
+        return
+
+    def _mutate(data):
+        items = data.setdefault(list_key, [])
+        items.append(item)
+        if len(items) > HISTORY_KEEP:
+            del items[: len(items) - HISTORY_KEEP]
+        return data
+
+    await content_history_store.update(_mutate)
+
 
 async def send_business_cheat(context: ContextTypes.DEFAULT_TYPE):
-    prompt = """Đóng vai một chuyên gia kinh doanh và ngôn ngữ. Hãy chia sẻ 1 'Business Cheat' cực kỳ thực chiến.
+    recent_topics = await _get_recent_history("cheat_topics")
+    avoid_str = (
+        "TUYỆT ĐỐI KHÔNG được chọn lại các chiến thuật đã chia sẻ gần đây: " + "; ".join(recent_topics)
+        if recent_topics
+        else "Đây là lần đầu tiên, thoải mái chọn."
+    )
+    prompt = f"""Đóng vai một chuyên gia kinh doanh và ngôn ngữ. Hãy chia sẻ 1 'Business Cheat' cực kỳ thực chiến.
+    {avoid_str}
     Cấu trúc:
     1. 🧠 Tên chiến thuật (Tên tiếng Việt + Tiếng Anh).
     2. 🎯 Bản chất & Ứng dụng (Giải thích thật ngắn gọn, sắc bén kèm ví dụ).
     3. 📚 English Cheat Sheet (3 từ vựng chuyên ngành. VỚI MỖI TỪ: Cung cấp Phiên âm quốc tế IPA + Cách đọc bồi tiếng Việt cho dễ đọc).
     Không dùng markdown # hay **, chỉ dùng thẻ <b> hoặc <i>.
-    QUAN TRỌNG: Dòng cuối cùng của kết quả PHẢI ghi đúng cú pháp sau để hệ thống tạo giọng đọc chuẩn bản xứ:
-    AUDIO_VOCAB|từ vựng 1, từ vựng 2, từ vựng 3"""
+    QUAN TRỌNG: 2 dòng cuối cùng của kết quả PHẢI ghi đúng cú pháp sau (không hiển thị gì thêm sau đó):
+    AUDIO_VOCAB|từ vựng 1, từ vựng 2, từ vựng 3
+    TOPIC_NAME|Tên chiến thuật (tiếng Anh, ngắn gọn, dùng để lưu lịch sử tránh lặp)"""
     try:
         res = await call_gemini_async(prompt)
 
         text_parts = []
         vocab_for_audio = ""
+        topic_name = ""
         for line in res.split("\n"):
             if line.startswith("AUDIO_VOCAB|"):
                 vocab_for_audio = line.split("|")[1]
+            elif line.startswith("TOPIC_NAME|"):
+                topic_name = line.split("|", 1)[1].strip()
             else:
                 text_parts.append(line)
 
@@ -47,6 +89,7 @@ async def send_business_cheat(context: ContextTypes.DEFAULT_TYPE):
             return await context.bot.send_message(chat_id=CHAT_ID_BOOKS, text=t, parse_mode=parse_mode)
 
         await send_chunked_message(_rep, msg)
+        await _append_history("cheat_topics", topic_name)
 
         if vocab_for_audio:
             audio_path = unique_temp_path("vocab", ".mp3")
@@ -131,21 +174,41 @@ async def send_news_to_channel(context: ContextTypes.DEFAULT_TYPE):
 
 async def send_book_to_channel(context: ContextTypes.DEFAULT_TYPE):
     today_str = datetime.now(VN_TZ).strftime("%Y-%m-%d")
-    prompt = """Trích NGUYÊN VĂN 1 đoạn trích tinh hoa (300 chữ) từ 1 cuốn sách Tâm lý/Tiền bạc kinh điển. KHÔNG DÙNG Markdown (**, #, ###).
+    recent_books = await _get_recent_history("book_titles")
+    avoid_str = (
+        "TUYỆT ĐỐI KHÔNG được chọn lại các cuốn sách đã trích gần đây: " + "; ".join(recent_books)
+        if recent_books
+        else "Đây là lần đầu tiên, thoải mái chọn."
+    )
+    prompt = f"""Trích NGUYÊN VĂN 1 đoạn trích tinh hoa (300 chữ) từ 1 cuốn sách Tâm lý/Tiền bạc kinh điển. KHÔNG DÙNG Markdown (**, #, ###).
+    {avoid_str}
     [Emoji] Tên sách - Tác giả
     [Nội dung trích đoạn]
-    💡 Suy ngẫm của quản gia: (1 câu đúc kết)"""
+    💡 Suy ngẫm của quản gia: (1 câu đúc kết)
+    QUAN TRỌNG: Dòng cuối cùng PHẢI ghi đúng cú pháp sau (không hiển thị gì thêm sau đó):
+    BOOK_TITLE|Tên sách - Tác giả"""
     # BUG FIX: bản gốc gọi client.models.generate_content trực tiếp,
     # không có retry/fallback -> job hằng ngày này có thể "trắng tay"
     # nếu Gemini lỗi thoáng qua đúng lúc 20h.
     response = await call_gemini_async(prompt)
+
+    book_title = ""
+    text_parts = []
+    for line in response.split("\n"):
+        if line.startswith("BOOK_TITLE|"):
+            book_title = line.split("|", 1)[1].strip()
+        else:
+            text_parts.append(line)
+    body = "\n".join(text_parts).strip()
+
     keyboard = [[InlineKeyboardButton("📖 Đã đọc xong & Suy ngẫm", callback_data=f"book_read_{today_str}")]]
     await context.bot.send_message(
         chat_id=CHAT_ID_BOOKS,
-        text=clean_for_telegram(response),
+        text=clean_for_telegram(body),
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
+    await _append_history("book_titles", book_title)
 
 
 async def manual_trigger(update, context: ContextTypes.DEFAULT_TYPE):

@@ -58,8 +58,14 @@ except ValueError as e:
 # cách nhau bằng dấu phẩy.
 ALLOWED_CHAT_IDS = _core_ids | _parse_chat_ids(os.getenv("ALLOWED_CHAT_IDS", ""))
 
+# BUG FIX (17/9, lần 5): Google ngừng cấp "gemini-2.5-pro" cho user
+# mới -- /deep và /pitch (2 lệnh duy nhất dùng MODEL_PRO) báo lỗi
+# 404 NOT_FOUND. Đổi sang model Google chỉ định thay thế ngay trong
+# chính thông báo lỗi ("Please update your code to use
+# models/gemini-3.1-pro-preview"). Không phải lỗi do code hay do sếp
+# thao tác -- Google tự đổi model available.
 GEMINI_MODEL = "gemini-flash-latest"
-MODEL_PRO = "gemini-2.5-pro"
+MODEL_PRO = "gemini-3.1-pro-preview"
 
 # Giữ nguyên tên file ở thư mục gốc như bản cũ — dùng làm nơi lưu dự
 # phòng/để migrate dữ liệu cũ 1 lần khi chuyển sang Postgres (xem
@@ -72,6 +78,12 @@ REMINDERS_FILE = "reminders.json"
 HEALTH_FILE = "health.json"
 NUTRITION_FILE = "nutrition.json"
 MEMORY_FILE = "memory.json"
+# BUG FIX (17/9, lần 6): lưu lịch sử chủ đề "Bữa trưa doanh nhân" +
+# tên sách "Trích sách tối" đã gửi gần đây -- trước đây jobs.py gọi
+# Gemini với prompt y hệt mỗi ngày, không biết hôm qua đã gửi gì, nên
+# dễ lặp lại chủ đề/cuốn sách sau vài ngày. Xem CONTENT_HISTORY_FILE
+# dùng trong jobs.py.
+CONTENT_HISTORY_FILE = "content_history.json"
 
 # Nếu đặt DATABASE_URL (VD connection string Supabase Postgres),
 # storage.py sẽ tự động dùng Postgres làm nơi lưu bền vững thay vì
