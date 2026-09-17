@@ -3,27 +3,30 @@ import time as sys_time
 from datetime import datetime, time
 
 import pytz
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
+    ApplicationHandlerStop,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
+    TypeHandler,
     filters,
 )
 
-from config import TELEGRAM_BOT_TOKEN, logger
+from config import ALLOWED_CHAT_IDS, TELEGRAM_BOT_TOKEN, logger
 from core_actions import load_pending_reminders
 from handlers.ai_chat import deep_command, handle_chat_route, handle_voice, learn_command, pitch_command
 from handlers.finance import budget_command, goal_command, report_command, salary_command, spend_command
 from handlers.health import cook_command, food_command, handle_photo, healthsetup_command
 from handlers.reminders import remind_command
+from handlers.system import help_command, start_command
 from handlers.todo import tasks_command, todo_command
 from handlers.video import handle_video
 from jobs import manual_trigger, send_book_to_channel, send_business_cheat, send_news_to_channel
 from server import start_dummy_server
-from storage import finance_store, todo_store
+from storage import finance_store, migrate_legacy_json_if_needed, todo_store
 
 VN_TZ = pytz.timezone("Asia/Ho_Chi_Minh")
 
@@ -66,6 +69,29 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await tasks_command(update, context)
 
 
+async def guard_access(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Chặn truy cập từ chat_id lạ — HẠNG MỤC B.
+
+    Bản gốc (và các bản refactor trước) đọc TELEGRAM_CHAT_ID từ .env
+    nhưng KHÔNG DÙNG nó để chặn gì cả: bất kỳ ai tìm ra bot (VD thêm
+    nhầm vào nhóm, hoặc đoán được username) đều thao tác được —
+    xem/sửa dữ liệu tài chính-sức khoẻ riêng tư, tốn quota Gemini của
+    sếp. Handler này đăng ký ở group=-1 (chạy TRƯỚC mọi handler khác,
+    xem main()) và raise ApplicationHandlerStop để chặn update lan
+    tiếp xuống các handler group sau, nếu chat_id không nằm trong
+    config.ALLOWED_CHAT_IDS (chat riêng của sếp + 2 kênh broadcast +
+    danh sách tuỳ chọn qua biến môi trường).
+
+    Cố tình KHÔNG trả lời gì cho chat lạ (im lặng) — vừa tránh lộ
+    thông tin bot còn sống/đang làm gì, vừa tránh bị lợi dụng để spam
+    tin nhắn phản hồi tới người khác.
+    """
+    chat = update.effective_chat
+    if chat is not None and chat.id not in ALLOWED_CHAT_IDS:
+        logger.warning("🚫 Chặn truy cập từ chat_id lạ: %s (%s)", chat.id, chat.type)
+        raise ApplicationHandlerStop
+
+
 async def on_error(update, context: ContextTypes.DEFAULT_TYPE):
     """Global error handler — bản gốc KHÔNG có cái này, nên lỗi phát
     sinh ngoài các khối try/except thủ công (VD trong button_callback,
@@ -78,15 +104,60 @@ async def on_error(update, context: ContextTypes.DEFAULT_TYPE):
 async def post_init(app: Application):
     """Chạy 1 lần sau khi Application dựng xong, trước khi polling bắt
     đầu — cách làm chuẩn của PTB v20 để nạp lại reminder còn dang dở,
-    thay vì gọi hàm đồng bộ giữa chừng main() như bản gốc."""
+    thay vì gọi hàm đồng bộ giữa chừng main() như bản gốc.
+
+    HẠNG MỤC A2 + C: migrate dữ liệu JSON cũ sang Postgres (nếu có
+    DATABASE_URL và đây là lần đầu chuyển sang dùng Postgres), và đăng
+    ký danh sách lệnh với Telegram để hiện gợi ý khi sếp gõ "/"."""
+    await migrate_legacy_json_if_needed()
     await load_pending_reminders(app.job_queue)
+    await app.bot.set_my_commands(
+        [
+            BotCommand("start", "Giới thiệu bot"),
+            BotCommand("help", "Xem danh sách đầy đủ các lệnh"),
+            BotCommand("salary", "Khai báo lương tháng"),
+            BotCommand("budget", "Đặt ngân sách theo danh mục"),
+            BotCommand("spend", "Ghi chi tiêu"),
+            BotCommand("report", "Báo cáo chi tiêu tháng này"),
+            BotCommand("goal", "Theo dõi mục tiêu tài chính"),
+            BotCommand("todo", "Thêm việc cần làm"),
+            BotCommand("tasks", "Xem danh sách việc"),
+            BotCommand("remind", "Đặt nhắc nhở"),
+            BotCommand("learn", "Học nhanh 1 chủ đề"),
+            BotCommand("deep", "Hỏi sâu (model mạnh hơn)"),
+            BotCommand("pitch", "Phản biện/góp ý ý tưởng"),
+            BotCommand("healthsetup", "Khai báo thông tin sức khoẻ"),
+            BotCommand("food", "Tra cứu dinh dưỡng"),
+            BotCommand("cook", "Gợi ý món ăn"),
+            BotCommand("push", "Kích hoạt thủ công bản tin định kỳ"),
+        ]
+    )
 
 
 def main():
     start_dummy_server()
 
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
+    app = (
+        Application.builder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .post_init(post_init)
+        # HẠNG MỤC C: cho phép xử lý song song vài update cùng lúc
+        # (VD sếp gửi ảnh trong lúc video trước đang phân tích) thay
+        # vì xử lý tuần tự từng update một như mặc định. Giới hạn 8
+        # (không dùng True = không giới hạn) để tránh dùng quá nhiều
+        # quota Gemini cùng lúc trên gói free. An toàn với storage.py
+        # vì mọi read-modify-write đều đã bọc asyncio.Lock theo key.
+        .concurrent_updates(8)
+        .build()
+    )
 
+    # HẠNG MỤC B: guard chạy TRƯỚC TIÊN (group=-1) cho MỌI loại update
+    # (tin nhắn, callback query, ...) — chặn chat_id lạ trước khi tới
+    # bất kỳ handler nghiệp vụ nào bên dưới.
+    app.add_handler(TypeHandler(Update, guard_access), group=-1)
+
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("salary", salary_command))
     app.add_handler(CommandHandler("budget", budget_command))
     app.add_handler(CommandHandler("spend", spend_command))
