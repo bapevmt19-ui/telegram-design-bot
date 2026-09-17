@@ -45,3 +45,10 @@ def parse_amount(amount_str: str) -> int:
     if "m" in amount_str or "tr" in amount_str:
         return int(float(amount_str.replace("m", "").replace("tr", "")) * 1_000_000)
     return int(amount_str)
+
+from telegraph import Telegraph
+telegraph_client = Telegraph()
+try:
+    telegraph_client.create_account(short_name='LifeOS')
+except Exception:
+    pass
