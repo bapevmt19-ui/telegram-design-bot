@@ -14,6 +14,10 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID_PRIVATE = os.getenv("TELEGRAM_CHAT_ID")
 CHAT_ID_BOOKS = os.getenv("TELEGRAM_CHAT_ID_BOOKS", "-1004324433124")
 CHAT_ID_NEWS = os.getenv("TELEGRAM_CHAT_ID_NEWS", "-1004430444714")
+# Nâng cấp (17/9, lần 7): kênh riêng nhận file backup dữ liệu
+# (/export_data thủ công + tự động hàng tuần) — tách riêng khỏi chat
+# cá nhân để tránh loạn tin nhắn.
+CHAT_ID_BACKUP = os.getenv("TELEGRAM_CHAT_ID_BACKUP", "-1004393711929")
 
 if not GEMINI_API_KEY or not TELEGRAM_BOT_TOKEN:
     raise RuntimeError(
@@ -46,10 +50,11 @@ def _parse_chat_ids(raw: str) -> set[int]:
 
 
 try:
-    _core_ids = {int(CHAT_ID_PRIVATE), int(CHAT_ID_BOOKS), int(CHAT_ID_NEWS)}
+    _core_ids = {int(CHAT_ID_PRIVATE), int(CHAT_ID_BOOKS), int(CHAT_ID_NEWS), int(CHAT_ID_BACKUP)}
 except ValueError as e:
     raise RuntimeError(
-        "TELEGRAM_CHAT_ID / TELEGRAM_CHAT_ID_BOOKS / TELEGRAM_CHAT_ID_NEWS phải là số nguyên."
+        "TELEGRAM_CHAT_ID / TELEGRAM_CHAT_ID_BOOKS / TELEGRAM_CHAT_ID_NEWS / "
+        "TELEGRAM_CHAT_ID_BACKUP phải là số nguyên."
     ) from e
 
 # Danh sách chat_id được PHÉP dùng bot: chat riêng của sếp + 2 kênh
@@ -84,6 +89,16 @@ MEMORY_FILE = "memory.json"
 # dễ lặp lại chủ đề/cuốn sách sau vài ngày. Xem CONTENT_HISTORY_FILE
 # dùng trong jobs.py.
 CONTENT_HISTORY_FILE = "content_history.json"
+# Nâng cấp (17/9, lần 7): lưu access_token Telegraph để không mất
+# quyền sửa bài cũ mỗi lần bot restart (xem ai_client.py), và lưu các
+# "nhắc lặp lại" (/remind_daily, /remind_every) để nạp lại đúng sau
+# khi bot restart (xem handlers/reminders.py).
+SETTINGS_FILE = "settings.json"
+RECURRING_REMINDERS_FILE = "recurring_reminders.json"
+# Nếu sau ngần này phút kể từ lúc nhắc mà sếp chưa bấm "Đã xong", bot
+# tự nhắc lại thêm 1 lần nữa cho các nhắc nhở có mốc thời gian cụ thể
+# (/remind) — xem core_actions.py.
+REMINDER_FOLLOWUP_MINUTES = 30
 
 # Nếu đặt DATABASE_URL (VD connection string Supabase Postgres),
 # storage.py sẽ tự động dùng Postgres làm nơi lưu bền vững thay vì

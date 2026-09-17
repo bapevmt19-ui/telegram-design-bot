@@ -1,10 +1,13 @@
-"""Quản lý tài chính: /salary /budget /spend /goal /report"""
+"""Quản lý tài chính: /salary /budget /spend /goal /report /report_excel"""
 import asyncio
 import logging
 import os
 from datetime import datetime
 
 import matplotlib.pyplot as plt
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
@@ -120,6 +123,80 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         if os.path.exists(chart_path):
             os.remove(chart_path)
+
+
+def _render_excel_report(month_expenses: list, current_month: str, path: str):
+    """Hàm CPU/IO-bound thuần (không async), chạy trong thread riêng
+    bởi asyncio.to_thread ở report_excel_command — cùng nguyên tắc với
+    _render_pie_chart phía trên (không chặn event loop của bot).
+
+    Nâng cấp (17/9, lần 7): xuất báo cáo chi tiêu tháng ra file Excel
+    dạng bảng có cột được canh chỉnh (Ngày / Số tiền / Danh mục / Lý
+    do), có dòng tổng cuối bảng — bổ sung bên cạnh /report (biểu đồ
+    tròn) chứ không thay thế, vì có nhu cầu xem số liệu dạng bảng để
+    dễ đối chiếu/lọc hơn là chỉ nhìn biểu đồ.
+    """
+    wb = Workbook()
+    ws = wb.active
+    ws.title = f"Chi tieu {current_month}"[:31]  # Excel giới hạn tên sheet 31 ký tự
+
+    headers = ["Ngày", "Số tiền (VNĐ)", "Danh mục", "Lý do"]
+    ws.append(headers)
+    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    header_font = Font(bold=True, color="FFFFFF")
+    for col_idx in range(1, len(headers) + 1):
+        cell = ws.cell(row=1, column=col_idx)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center")
+
+    total = 0
+    for exp in sorted(month_expenses, key=lambda e: e["date"]):
+        ws.append([exp["date"], exp["amount"], exp.get("category", "Khac"), exp["reason"]])
+        total += exp["amount"]
+
+    total_row = ws.max_row + 1
+    ws.cell(row=total_row, column=1, value="TỔNG CỘNG").font = Font(bold=True)
+    total_cell = ws.cell(row=total_row, column=2, value=total)
+    total_cell.font = Font(bold=True)
+    total_cell.number_format = "#,##0"
+
+    for row in ws.iter_rows(min_row=2, max_row=total_row, min_col=2, max_col=2):
+        for cell in row:
+            cell.number_format = "#,##0"
+
+    for col_idx, header in enumerate(headers, start=1):
+        max_len = max(
+            [len(str(header))]
+            + [len(str(ws.cell(row=r, column=col_idx).value or "")) for r in range(2, ws.max_row + 1)]
+        )
+        ws.column_dimensions[get_column_letter(col_idx)].width = max_len + 4
+
+    wb.save(path)
+
+
+async def report_excel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    finance = await finance_store.read()
+    current_month = datetime.now().strftime("%Y-%m")
+    month_expenses = [e for e in finance.get("expenses", []) if e["date"].startswith(current_month)]
+
+    if not month_expenses:
+        await update.message.reply_text("Tháng này sếp chưa tiêu đồng nào cả!")
+        return
+
+    excel_path = unique_temp_path("report", ".xlsx")
+    await asyncio.to_thread(_render_excel_report, month_expenses, current_month, excel_path)
+
+    try:
+        with open(excel_path, "rb") as f:
+            await update.message.reply_document(
+                document=f,
+                filename=f"bao_cao_chi_tieu_{current_month}.xlsx",
+                caption=f"📊 Báo cáo chi tiêu tháng {current_month} dạng bảng.",
+            )
+    finally:
+        if os.path.exists(excel_path):
+            os.remove(excel_path)
 
 
 async def goal_command(update: Update, context: ContextTypes.DEFAULT_TYPE):

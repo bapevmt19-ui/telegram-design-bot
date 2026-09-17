@@ -1,9 +1,9 @@
 """To-do list: /todo /tasks"""
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
-from core_actions import execute_todo
+from core_actions import execute_todo, render_tasks_message
 from storage import todo_store
 
 
@@ -19,14 +19,9 @@ async def tasks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🎉 Không còn công việc nào tồn đọng.")
         return
 
-    msg = "📝 <b>DANH SÁCH CÔNG VIỆC CHƯA LÀM:</b>\n\n"
-    keyboard, row = [], []
-    for i, t in enumerate(pending):
-        msg += f"<b>{i + 1}.</b> {t['text']}\n"
-        row.append(InlineKeyboardButton(f"✅ Xong {i + 1}", callback_data=f"tododone_{t['id']}"))
-        if len(row) == 3:
-            keyboard.append(row)
-            row = []
-    if row:
-        keyboard.append(row)
+    # Nâng cấp (17/9, lần 7): logic hiển thị (thẻ !gấp, hạn chót, số
+    # ngày tồn đọng, nút "✅ Xong" riêng theo từng task) giờ dùng chung
+    # với các job tự động nhắc việc 3x/ngày — xem render_tasks_message
+    # trong core_actions.py.
+    msg, keyboard = render_tasks_message(pending)
     await update.message.reply_text(msg, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard))

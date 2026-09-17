@@ -8,3 +8,4 @@ telegraph>=0.8
 google-genai>=0.3
 gTTS>=2.5
 asyncpg>=0.29
+openpyxl>=3.1

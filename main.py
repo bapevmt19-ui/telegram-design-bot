@@ -16,18 +16,35 @@ from telegram.ext import (
     filters,
 )
 
+from ai_client import init_telegraph
 from config import ALLOWED_CHAT_IDS, TELEGRAM_BOT_TOKEN, logger
 from core_actions import load_pending_reminders
 from handlers.ai_chat import deep_command, handle_chat_route, handle_voice, learn_command, pitch_command
-from handlers.finance import budget_command, goal_command, report_command, salary_command, spend_command
+from handlers.backup import export_data_command, weekly_backup_job
+from handlers.finance import budget_command, goal_command, report_command, report_excel_command, salary_command, spend_command
 from handlers.health import cook_command, food_command, handle_photo, healthsetup_command
-from handlers.reminders import remind_command
+from handlers.reminders import (
+    load_recurring_reminders,
+    remind_command,
+    remind_daily_command,
+    remind_every_command,
+    remind_list_command,
+    remind_stop_command,
+)
 from handlers.system import help_command, start_command
 from handlers.todo import tasks_command, todo_command
 from handlers.video import handle_video
-from jobs import manual_trigger, send_book_to_channel, send_business_cheat, send_news_to_channel
+from jobs import (
+    broadcast_tasks_reminder,
+    broadcast_urgent_tasks_reminder,
+    manual_trigger,
+    remind_expense_job,
+    send_book_to_channel,
+    send_business_cheat,
+    send_news_to_channel,
+)
 from server import start_dummy_server
-from storage import finance_store, migrate_legacy_json_if_needed, todo_store
+from storage import finance_store, migrate_legacy_json_if_needed, reminders_store, todo_store
 
 VN_TZ = pytz.timezone("Asia/Ho_Chi_Minh")
 
@@ -68,6 +85,23 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await todo_store.update(_mutate)
         await tasks_command(update, context)
+    elif query.data.startswith("remind_done_"):
+        # Nâng cấp (17/9, lần 7): xác nhận đã xong 1 nhắc nhở có mốc
+        # thời gian cụ thể (/remind) -> dừng "nhắc lại" ở
+        # send_reminder_followup_job (core_actions.py) vì hàm đó chỉ
+        # nhắc tiếp nếu status vẫn còn "sent".
+        reminder_id = query.data.split("_", 2)[2]
+
+        def _mutate(data):
+            for r in data.get("reminders", []):
+                if r["id"] == reminder_id:
+                    r["status"] = "done"
+            return data
+
+        await reminders_store.update(_mutate)
+        await query.edit_message_reply_markup(
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ Đã hoàn thành", callback_data="none")]])
+        )
 
 
 async def guard_access(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -124,7 +158,16 @@ async def post_init(app: Application):
             "sẽ tự thử lại Postgres ở lần đọc/ghi dữ liệu kế tiếp): %s",
             e,
         )
+    # Nâng cấp (17/9, lần 7): nạp lại access_token Telegraph đã lưu
+    # (nếu có) — xem ai_client.init_telegraph(). Bọc try/except cùng lý
+    # do với migrate ở trên: lỗi ở đây (VD Telegraph tạm sập) không
+    # được phép làm treo cả polling.
+    try:
+        await init_telegraph()
+    except Exception as e:
+        logger.error("⚠️ Không khởi tạo được Telegraph lúc khởi động: %s", e)
     await load_pending_reminders(app.job_queue)
+    await load_recurring_reminders(app.job_queue)
     await app.bot.set_my_commands(
         [
             BotCommand("start", "Giới thiệu bot"),
@@ -133,16 +176,22 @@ async def post_init(app: Application):
             BotCommand("budget", "Đặt ngân sách theo danh mục"),
             BotCommand("spend", "Ghi chi tiêu"),
             BotCommand("report", "Báo cáo chi tiêu tháng này"),
+            BotCommand("report_excel", "Xuất báo cáo chi tiêu ra file Excel"),
             BotCommand("goal", "Theo dõi mục tiêu tài chính"),
-            BotCommand("todo", "Thêm việc cần làm"),
+            BotCommand("todo", "Thêm việc cần làm (hỗ trợ !gấp, hạn:DD/MM)"),
             BotCommand("tasks", "Xem danh sách việc"),
-            BotCommand("remind", "Đặt nhắc nhở"),
+            BotCommand("remind", "Đặt nhắc nhở 1 lần (có thể ghi ngày cụ thể)"),
+            BotCommand("remind_daily", "Đặt nhắc lặp lại hàng ngày"),
+            BotCommand("remind_every", "Đặt nhắc lặp lại theo mỗi N giờ"),
+            BotCommand("remind_list", "Xem các nhắc lặp lại đang chạy"),
+            BotCommand("remind_stop", "Tắt 1 nhắc lặp lại"),
             BotCommand("learn", "Học nhanh 1 chủ đề"),
             BotCommand("deep", "Hỏi sâu (model mạnh hơn)"),
             BotCommand("pitch", "Phản biện/góp ý ý tưởng"),
             BotCommand("healthsetup", "Khai báo thông tin sức khoẻ"),
             BotCommand("food", "Tra cứu dinh dưỡng"),
             BotCommand("cook", "Gợi ý món ăn"),
+            BotCommand("export_data", "Tải file sao lưu dữ liệu"),
             BotCommand("push", "Kích hoạt thủ công bản tin định kỳ"),
         ]
     )
@@ -177,8 +226,13 @@ def main():
     app.add_handler(CommandHandler("spend", spend_command))
     app.add_handler(CommandHandler("goal", goal_command))
     app.add_handler(CommandHandler("report", report_command))
+    app.add_handler(CommandHandler("report_excel", report_excel_command))
     app.add_handler(CommandHandler("todo", todo_command))
     app.add_handler(CommandHandler("remind", remind_command))
+    app.add_handler(CommandHandler("remind_daily", remind_daily_command))
+    app.add_handler(CommandHandler("remind_every", remind_every_command))
+    app.add_handler(CommandHandler("remind_list", remind_list_command))
+    app.add_handler(CommandHandler("remind_stop", remind_stop_command))
     app.add_handler(CommandHandler("healthsetup", healthsetup_command))
     app.add_handler(CommandHandler("food", food_command))
     app.add_handler(CommandHandler("cook", cook_command))
@@ -188,6 +242,7 @@ def main():
     # BUG FIX: bản gốc định nghĩa deep_command nhưng KHÔNG BAO GIỜ
     # đăng ký handler cho nó -> lệnh /deep chưa từng hoạt động.
     app.add_handler(CommandHandler("deep", deep_command))
+    app.add_handler(CommandHandler("export_data", export_data_command))
     app.add_handler(CommandHandler("push", manual_trigger))
 
     app.add_handler(CallbackQueryHandler(button_callback))
@@ -201,6 +256,21 @@ def main():
     app.job_queue.run_daily(send_news_to_channel, time=time(hour=7, minute=0, tzinfo=VN_TZ))
     app.job_queue.run_daily(send_business_cheat, time=time(hour=12, minute=0, tzinfo=VN_TZ))
     app.job_queue.run_daily(send_book_to_channel, time=time(hour=20, minute=0, tzinfo=VN_TZ))
+
+    # Nâng cấp (17/9, lần 7):
+    # - Nhắc cập nhật chi tiêu cuối ngày lúc 23h (chỉ nhắc nếu hôm đó
+    #   chưa ghi khoản chi nào — xem remind_expense_job).
+    # - Sao lưu dữ liệu tự động vào kênh riêng mỗi Chủ nhật 22h (ngày
+    #   trong tuần theo quy ước PTB: Thứ Hai=0 ... Chủ Nhật=6).
+    # - Nhắc việc còn tồn đọng 3 khung giờ hành chính cố định/ngày.
+    # - Nhắc RIÊNG việc !gấp/quá hạn mỗi 2 tiếng trong giờ hành chính
+    #   (8h-18h), để không bị trôi giữa 2 lần nhắc cố định ở trên.
+    app.job_queue.run_daily(remind_expense_job, time=time(hour=23, minute=0, tzinfo=VN_TZ))
+    app.job_queue.run_daily(weekly_backup_job, time=time(hour=22, minute=0, tzinfo=VN_TZ), days=(6,))
+    for h, m in [(9, 0), (13, 30), (17, 0)]:
+        app.job_queue.run_daily(broadcast_tasks_reminder, time=time(hour=h, minute=m, tzinfo=VN_TZ))
+    for h in range(8, 19, 2):
+        app.job_queue.run_daily(broadcast_urgent_tasks_reminder, time=time(hour=h, minute=0, tzinfo=VN_TZ))
 
     logger.info("🤖 Quản Gia Life-OS đang khởi động...")
 

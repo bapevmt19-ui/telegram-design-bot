@@ -47,7 +47,9 @@ from config import (
     IDEAS_FILE,
     MEMORY_FILE,
     NUTRITION_FILE,
+    RECURRING_REMINDERS_FILE,
     REMINDERS_FILE,
+    SETTINGS_FILE,
     TODO_FILE,
 )
 
@@ -239,6 +241,14 @@ memory_store = _make_store("memory", MEMORY_FILE, lambda: {"rules": []})
 content_history_store = _make_store(
     "content_history", CONTENT_HISTORY_FILE, lambda: {"cheat_topics": [], "book_titles": []}
 )
+# Nâng cấp (17/9, lần 7): kho key-value tổng quát cho các thiết lập
+# vặt của bot — hiện dùng để lưu access_token Telegraph (xem
+# ai_client.py), tránh mất quyền sửa bài cũ mỗi lần bot restart.
+settings_store = _make_store("settings", SETTINGS_FILE, lambda: {})
+# Danh sách "nhắc lặp lại" đang chạy (/remind_daily, /remind_every) —
+# lưu lại để nạp đăng ký lại đúng vào job_queue sau khi bot restart
+# (xem load_recurring_reminders trong handlers/reminders.py).
+recurring_reminders_store = _make_store("recurring_reminders", RECURRING_REMINDERS_FILE, lambda: {"items": []})
 
 # (key, file_path cũ, default_factory) — dùng cho migrate 1 lần bên dưới.
 _ALL_STORES_META = [
@@ -250,6 +260,8 @@ _ALL_STORES_META = [
     ("nutrition", NUTRITION_FILE, lambda: {}),
     ("memory", MEMORY_FILE, lambda: {"rules": []}),
     ("content_history", CONTENT_HISTORY_FILE, lambda: {"cheat_topics": [], "book_titles": []}),
+    ("settings", SETTINGS_FILE, lambda: {}),
+    ("recurring_reminders", RECURRING_REMINDERS_FILE, lambda: {"items": []}),
 ]
 
 

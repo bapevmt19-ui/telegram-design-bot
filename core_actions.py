@@ -5,11 +5,14 @@ code giữa 2 luồng nhập liệu (bản gốc từng lặp gần như y hệt
 này ở cả /spend, /todo và trong handle_voice).
 """
 import logging
-from datetime import datetime
+import re
+from datetime import datetime, timedelta
 
 import pytz
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from ai_client import call_gemini_async, clean_for_telegram
+from config import REMINDER_FOLLOWUP_MINUTES
 from storage import finance_store, ideas_store, reminders_store, todo_store
 from telegram_helpers import send_chunked_message
 
@@ -88,19 +91,117 @@ async def execute_spend(chat_id, context, amount, reason):
     await send_chunked_message(_rep, clean_for_telegram(msg))
 
 
+# Nâng cấp (17/9, lần 7): "nhắc việc nâng cao" — /todo giờ nhận thêm 2
+# thẻ tuỳ chọn viết chèn trong nội dung, không cần đúng vị trí:
+#   !gấp        -> đánh dấu việc ưu tiên cao, được nhắc dày hơn
+#                  (mỗi 2 tiếng giờ hành chính thay vì 3 lần cố định/ngày).
+#   hạn:DD/MM   -> gắn hạn chót, tự in đậm cảnh báo khi tới/quá hạn.
+# VD: /todo Chuẩn bị hợp đồng hạn:20/09 !gấp
+_URGENT_TAG = "!gấp"
+_DEADLINE_TAG_RE = re.compile(r"hạn:(\d{1,2}/\d{1,2})")
+
+
+def _parse_todo_tags(raw_text: str) -> tuple[str, bool, str | None]:
+    """Tách thẻ !gấp / hạn:DD/MM khỏi nội dung việc cần làm, trả về
+    (nội_dung_đã_làm_sạch, có_gấp, hạn_chót_hoặc_None)."""
+    text = raw_text
+    urgent = _URGENT_TAG in text
+    if urgent:
+        text = text.replace(_URGENT_TAG, "")
+
+    deadline = None
+    m = _DEADLINE_TAG_RE.search(text)
+    if m:
+        deadline = m.group(1)
+        text = text.replace(m.group(0), "")
+
+    text = re.sub(r"\s+", " ", text).strip()
+    return text, urgent, deadline
+
+
+def is_deadline_overdue(deadline_str: str | None) -> bool:
+    """True nếu hạn:DD/MM đã tới hôm nay hoặc đã qua (so theo năm hiện
+    tại). Dữ liệu sai định dạng/ngày không hợp lệ -> coi như chưa quá
+    hạn (an toàn hơn là báo nhầm)."""
+    if not deadline_str:
+        return False
+    try:
+        day, month = map(int, deadline_str.split("/"))
+        today = datetime.now(VN_TZ).date()
+        deadline_date = today.replace(month=month, day=day)
+        return deadline_date <= today
+    except Exception:
+        return False
+
+
+def render_tasks_message(pending_tasks: list) -> tuple[str, list]:
+    """Dựng (text, keyboard) hiển thị danh sách việc còn tồn đọng —
+    dùng chung giữa lệnh /tasks gõ tay (handlers/todo.py) và các job tự
+    động nhắc việc định kỳ (jobs.py), để 2 nơi không lặp lại logic định
+    dạng/gắn nút. Mỗi việc luôn có nút "✅ Xong" RIÊNG gắn theo đúng
+    task['id'] của nó — bấm xong việc nào chỉ đánh dấu đúng việc đó,
+    các việc còn lại trong danh sách không hề bị ảnh hưởng."""
+    today = datetime.now(VN_TZ).date()
+    msg = "📝 <b>DANH SÁCH CÔNG VIỆC CHƯA LÀM:</b>\n\n"
+    keyboard, row = [], []
+    for i, t in enumerate(pending_tasks):
+        line = f"<b>{i + 1}.</b> {t['text']}"
+
+        tags = []
+        if t.get("urgent"):
+            tags.append("⚡ gấp")
+        deadline = t.get("deadline")
+        if deadline:
+            tags.append(f"⚠️ QUÁ HẠN {deadline}" if is_deadline_overdue(deadline) else f"📅 hạn {deadline}")
+        try:
+            created = datetime.strptime(t.get("created", ""), "%Y-%m-%d").date()
+            days_pending = (today - created).days
+            if days_pending >= 3:
+                tags.append(f"🕒 tồn {days_pending} ngày")
+        except Exception:
+            pass
+        if tags:
+            line += " (" + ", ".join(tags) + ")"
+
+        msg += line + "\n"
+        row.append(InlineKeyboardButton(f"✅ Xong {i + 1}", callback_data=f"tododone_{t['id']}"))
+        if len(row) == 3:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    return msg, keyboard
+
+
 async def execute_todo(chat_id, context, task_text):
+    clean_text, urgent, deadline = _parse_todo_tags(task_text)
     task_id = str(int(datetime.now().timestamp()))
 
     def _mutate(data):
-        data.setdefault("tasks", []).append({"id": task_id, "text": task_text, "status": "pending"})
+        data.setdefault("tasks", []).append(
+            {
+                "id": task_id,
+                "text": clean_text,
+                "status": "pending",
+                "urgent": urgent,
+                "deadline": deadline,
+                "created": datetime.now(VN_TZ).strftime("%Y-%m-%d"),
+            }
+        )
         return data
 
     await todo_store.update(_mutate)
 
+    tag_note = ""
+    if urgent:
+        tag_note += " ⚡ (gấp — nhắc mỗi 2 tiếng giờ hành chính)"
+    if deadline:
+        tag_note += f" 📅 (hạn {deadline})"
+
     async def _rep(t, parse_mode="HTML"):
         return await context.bot.send_message(chat_id=chat_id, text=t, parse_mode=parse_mode)
 
-    await send_chunked_message(_rep, f"📝 Đã ghi nhận việc: <b>{task_text}</b>")
+    await send_chunked_message(_rep, f"📝 Đã ghi nhận việc: <b>{clean_text}</b>{tag_note}")
 
 
 async def execute_idea(chat_id, context, idea_text):
@@ -119,6 +220,12 @@ async def execute_idea(chat_id, context, idea_text):
 
 
 # --- Hệ thống báo thức / nhắc nhở ---
+# Nâng cấp (17/9, lần 7): trước đây tin nhắn nhắc nhở gửi xong là tự
+# đánh dấu "done" ngay lập tức — không hề biết sếp có THỰC SỰ đọc/làm
+# hay không, và im lặng luôn nếu sếp lỡ quên. Giờ trạng thái chuyển
+# thành "sent" (không phải "done"), kèm nút "✅ Đã xong" để sếp tự xác
+# nhận; nếu sau REMINDER_FOLLOWUP_MINUTES phút vẫn chưa bấm, bot tự
+# nhắc lại thêm đúng 1 lần nữa (send_reminder_followup_job).
 async def send_reminder_job(context):
     data = context.job.data
     task_id, chat_id, task_text = data["id"], data["chat_id"], data["text"]
@@ -126,15 +233,46 @@ async def send_reminder_job(context):
     def _mutate(reminders):
         for r in reminders.get("reminders", []):
             if r["id"] == task_id:
-                r["status"] = "done"
+                r["status"] = "sent"
         return reminders
 
     await reminders_store.update(_mutate)
 
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Đã xong", callback_data=f"remind_done_{task_id}")]])
+
     async def _rep(t, parse_mode="HTML"):
-        return await context.bot.send_message(chat_id=chat_id, text=t, parse_mode=parse_mode)
+        return await context.bot.send_message(chat_id=chat_id, text=t, parse_mode=parse_mode, reply_markup=keyboard)
 
     await send_chunked_message(_rep, f"🔔 <b>BÁO THỨC / NHẮC NHỞ:</b>\nSếp ơi, đến giờ: <b>{task_text}</b>")
+
+    context.job_queue.run_once(
+        send_reminder_followup_job,
+        when=timedelta(minutes=REMINDER_FOLLOWUP_MINUTES),
+        data={"id": task_id, "chat_id": chat_id, "text": task_text},
+        name=f"remind_followup_{task_id}",
+    )
+
+
+async def send_reminder_followup_job(context):
+    """Nhắc lại ĐÚNG 1 LẦN nếu sau REMINDER_FOLLOWUP_MINUTES phút sếp
+    vẫn chưa bấm "✅ Đã xong" (trạng thái vẫn còn "sent"). Nếu đã xác
+    nhận xong rồi (status="done") thì im lặng, không làm phiền thêm."""
+    data = context.job.data
+    task_id, chat_id, task_text = data["id"], data["chat_id"], data["text"]
+
+    reminders = await reminders_store.read()
+    current = next((r for r in reminders.get("reminders", []) if r["id"] == task_id), None)
+    if not current or current.get("status") != "sent":
+        return
+
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Đã xong", callback_data=f"remind_done_{task_id}")]])
+
+    async def _rep(t, parse_mode="HTML"):
+        return await context.bot.send_message(chat_id=chat_id, text=t, parse_mode=parse_mode, reply_markup=keyboard)
+
+    await send_chunked_message(
+        _rep, f"🔁 <b>NHẮC LẠI:</b> Sếp vẫn chưa xác nhận xong việc:\n<b>{task_text}</b>"
+    )
 
 
 async def add_reminder(job_queue, chat_id, remind_time: datetime, task_text: str):
@@ -182,6 +320,18 @@ async def load_pending_reminders(job_queue):
                         r["status"] = "missed"
                 except Exception as e:
                     logger.warning("Reminder lỗi định dạng thời gian: %s", e)
+            elif r["status"] == "sent":
+                # Bot đã gửi nhắc nhở này rồi nhưng restart trước khi
+                # kịp bắn lần "nhắc lại" (job followup chỉ nằm trong bộ
+                # nhớ, không bền qua restart như job_queue nói chung) —
+                # đặt lại followup tính từ lúc bot vừa khởi động lại,
+                # thay vì bỏ quên hẳn nhắc nhở này.
+                job_queue.run_once(
+                    send_reminder_followup_job,
+                    when=timedelta(minutes=REMINDER_FOLLOWUP_MINUTES),
+                    data={"id": r["id"], "chat_id": r["chat_id"], "text": r["text"]},
+                    name=f"remind_followup_{r['id']}",
+                )
         return data
 
     await reminders_store.update(_mutate)

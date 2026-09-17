@@ -18,18 +18,56 @@ from google import genai
 from telegraph import Telegraph
 
 from config import GEMINI_API_KEY, GEMINI_MODEL
+from storage import settings_store
 
 logger = logging.getLogger(__name__)
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
+# BUG FIX (17/9, lần 7): bản trước gọi create_account() ngay ở đây,
+# MỖI LẦN bot khởi động lại — Telegraph coi đó là 1 tài khoản MỚI, nên
+# mất quyền sửa mọi trang đã tạo ở lần chạy trước (trang cũ vẫn đọc
+# được bình thường, chỉ là không sửa lại được nữa). Giờ chỉ khởi tạo
+# object rỗng ở đây (không gọi mạng lúc import module); việc đăng
+# nhập/tạo account thật sự chuyển sang init_telegraph() bên dưới, gọi
+# 1 lần trong post_init của main.py — cùng nhịp với
+# migrate_legacy_json_if_needed()/load_pending_reminders().
 telegraph_client = Telegraph()
-telegraph_client.create_account(short_name="LifeOS", author_name="Quản Gia Life-OS")
-# Lưu ý vận hành: bản gốc tạo account Telegraph mới MỖI LẦN bot khởi
-# động lại, nghĩa là mất quyền sửa các trang đã tạo ở lần chạy trước.
-# Nếu cần giữ quyền sửa qua nhiều lần deploy, hãy lưu
-# `telegraph_client.get_access_token()` ra file/biến môi trường và
-# dùng `Telegraph(access_token=...)` thay vì create_account() mỗi lần.
+
+
+async def init_telegraph():
+    """Nạp lại access_token Telegraph đã lưu (nếu có) thay vì luôn tạo
+    account mới — giữ được quyền sửa các trang đã đăng ở lần chạy
+    trước qua mọi lần Render redeploy/restart.
+
+    Cố tình SỬA TRỰC TIẾP `telegraph_client.access_token` thay vì gán
+    lại biến `telegraph_client` bằng 1 object Telegraph() mới: các
+    module khác (VD jobs.py) đã `from ai_client import telegraph_client`
+    lúc import — nếu gán lại biến ở đây, tham chiếu bên jobs.py vẫn
+    trỏ tới object CŨ (Python bind tên biến tại thời điểm import, không
+    tự cập nhật theo). Sửa thuộc tính trên cùng 1 object thì mọi nơi
+    đã import đều thấy thay đổi.
+    """
+    saved = await settings_store.read()
+    token = saved.get("telegraph_access_token")
+    if token:
+        telegraph_client.access_token = token
+        logger.info("Đã nạp lại access_token Telegraph cũ (giữ quyền sửa bài đã đăng).")
+        return
+    try:
+        await asyncio.to_thread(
+            telegraph_client.create_account, short_name="LifeOS", author_name="Quản Gia Life-OS"
+        )
+        new_token = telegraph_client.get_access_token()
+
+        def _mutate(data):
+            data["telegraph_access_token"] = new_token
+            return data
+
+        await settings_store.update(_mutate)
+        logger.info("Đã tạo account Telegraph mới và lưu lại access_token cho các lần chạy sau.")
+    except Exception as e:
+        logger.error("Không tạo được account Telegraph (bài trích sách/tin tức có thể lỗi): %s", e)
 
 
 def call_gemini_robust(client_instance, prompt, model=GEMINI_MODEL, is_json=False):

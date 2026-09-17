@@ -13,8 +13,9 @@ from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 from ai_client import call_gemini_async, clean_for_telegram, telegraph_client
-from config import CHAT_ID_BOOKS, CHAT_ID_NEWS, RSS_FEEDS_AI, RSS_FEEDS_DESIGN
-from storage import content_history_store
+from config import CHAT_ID_BOOKS, CHAT_ID_NEWS, CHAT_ID_PRIVATE, RSS_FEEDS_AI, RSS_FEEDS_DESIGN
+from core_actions import is_deadline_overdue, render_tasks_message
+from storage import content_history_store, finance_store, todo_store
 from telegram_helpers import send_chunked_message, unique_temp_path
 
 logger = logging.getLogger(__name__)
@@ -216,3 +217,55 @@ async def manual_trigger(update, context: ContextTypes.DEFAULT_TYPE):
     await send_news_to_channel(context)
     await send_business_cheat(context)
     await send_book_to_channel(context)
+
+
+# Nâng cấp (17/9, lần 7): nhắc cập nhật chi tiêu cuối ngày — nếu hôm
+# đó chưa ghi khoản chi nào (kể cả 0đ tức không tiêu gì) thì mới nhắc,
+# tránh làm phiền khi sếp đã ghi rồi.
+async def remind_expense_job(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        finance = await finance_store.read()
+        today_str = datetime.now(VN_TZ).strftime("%Y-%m-%d")
+        today_expenses = [e for e in finance.get("expenses", []) if e.get("date") == today_str]
+        if today_expenses:
+            return
+        await context.bot.send_message(
+            chat_id=CHAT_ID_PRIVATE,
+            text="🌙 Sếp ơi, hôm nay chưa ghi khoản chi tiêu nào. Đừng quên /spend nếu có phát sinh nhé!",
+        )
+    except Exception as e:
+        logger.error("Lỗi gửi nhắc chi tiêu cuối ngày: %s", e)
+
+
+# Nâng cấp (17/9, lần 7): "nhắc việc nâng cao" — thay vì chỉ hiện danh
+# sách khi sếp tự gõ /tasks, bot chủ động đẩy lại danh sách việc còn
+# tồn đọng theo lịch (xem main.py):
+#   - urgent_only=False: 3 khung giờ hành chính cố định/ngày, cho MỌI
+#     việc còn tồn đọng.
+#   - urgent_only=True: mỗi 2 tiếng trong giờ hành chính, CHỈ cho việc
+#     gắn !gấp hoặc đã tới/quá hạn (hạn:DD/MM) — để việc gấp không bị
+#     trôi mất giữa 2 lần nhắc cố định.
+# Dùng chung render_tasks_message() với /tasks (core_actions.py) nên
+# mỗi việc luôn có nút "✅ Xong" RIÊNG theo đúng id của nó — bấm xong 1
+# việc không hề ảnh hưởng tới các việc còn lại trong danh sách.
+async def broadcast_tasks_reminder(context: ContextTypes.DEFAULT_TYPE, urgent_only: bool = False):
+    try:
+        todos = await todo_store.read()
+        pending = [t for t in todos.get("tasks", []) if t["status"] == "pending"]
+        if urgent_only:
+            pending = [t for t in pending if t.get("urgent") or is_deadline_overdue(t.get("deadline"))]
+        if not pending:
+            return  # không có gì để nhắc -> im lặng, tránh gửi tin rỗng
+
+        msg, keyboard = render_tasks_message(pending)
+        if urgent_only:
+            msg = "⚡ <b>NHẮC VIỆC GẤP/QUÁ HẠN:</b>\n\n" + msg.split("\n\n", 1)[1]
+        await context.bot.send_message(
+            chat_id=CHAT_ID_PRIVATE, text=msg, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    except Exception as e:
+        logger.error("Lỗi gửi nhắc việc tự động (urgent_only=%s): %s", urgent_only, e)
+
+
+async def broadcast_urgent_tasks_reminder(context: ContextTypes.DEFAULT_TYPE):
+    await broadcast_tasks_reminder(context, urgent_only=True)
