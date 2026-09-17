@@ -1,4 +1,5 @@
 """Điểm khởi động của Quản Gia Life-OS."""
+import asyncio
 import time as sys_time
 from datetime import datetime, time
 
@@ -108,8 +109,21 @@ async def post_init(app: Application):
 
     HẠNG MỤC A2 + C: migrate dữ liệu JSON cũ sang Postgres (nếu có
     DATABASE_URL và đây là lần đầu chuyển sang dùng Postgres), và đăng
-    ký danh sách lệnh với Telegram để hiện gợi ý khi sếp gõ "/"."""
-    await migrate_legacy_json_if_needed()
+    ký danh sách lệnh với Telegram để hiện gợi ý khi sếp gõ "/".
+
+    Cố tình bọc try/except quanh migrate: nếu Postgres đang lỗi/chưa
+    kết nối được (VD sai connection string, DB đang khởi động...),
+    KHÔNG được để cả bot sập theo — thà bot vẫn chạy được các lệnh
+    khác (và tự thử lại Postgres ở lần đọc/ghi dữ liệu kế tiếp) còn
+    hơn treo luôn polling chỉ vì 1 bước migrate 1 lần lúc khởi động."""
+    try:
+        await migrate_legacy_json_if_needed()
+    except Exception as e:
+        logger.error(
+            "⚠️ Không migrate được dữ liệu cũ sang Postgres lúc khởi động (bot vẫn tiếp tục chạy, "
+            "sẽ tự thử lại Postgres ở lần đọc/ghi dữ liệu kế tiếp): %s",
+            e,
+        )
     await load_pending_reminders(app.job_queue)
     await app.bot.set_my_commands(
         [
@@ -195,6 +209,14 @@ def main():
     # (5s -> 10s -> ... -> tối đa 60s) so với bản gốc (luôn sleep cố
     # định 5s), để tránh spam Telegram API nếu lỗi kéo dài do nguyên
     # nhân không tự khỏi (VD sai token/cấu hình).
+    #
+    # BUG FIX (17/9, lần 3): app.run_polling() tự quản lý 1 event loop
+    # asyncio và ĐÓNG nó lại khi thoát (kể cả khi thoát do lỗi) — gọi
+    # lại app.run_polling() lần 2 trên cùng tiến trình mà không tạo
+    # event loop mới sẽ luôn báo "Event loop is closed" và bot kẹt
+    # vĩnh viễn ở trạng thái lỗi dù nguyên nhân gốc (VD Postgres tạm
+    # mất kết nối) đã tự hết. Tạo event loop mới trước mỗi lần thử lại
+    # để vòng lặp thực sự hồi phục được.
     backoff = 5
     while True:
         try:
@@ -204,6 +226,10 @@ def main():
             logger.error("Lỗi Polling (chờ %ss thử lại): %s", backoff, e)
             sys_time.sleep(backoff)
             backoff = min(backoff * 2, 60)
+            try:
+                asyncio.set_event_loop(asyncio.new_event_loop())
+            except Exception as loop_err:
+                logger.error("Không tạo lại được event loop: %s", loop_err)
 
 
 if __name__ == "__main__":
