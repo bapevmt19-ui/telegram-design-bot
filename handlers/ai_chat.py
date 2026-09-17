@@ -243,37 +243,3 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         if file_path and os.path.exists(file_path):
             os.remove(file_path)
-
-
-async def handle_video(update, context):
-    import os
-    import asyncio
-    from datetime import datetime
-    from config import VN_TZ, MODEL_PRO
-    from ai_client import client, call_gemini_async, clean_for_telegram
-    from telegram_helpers import send_chunked_message, safe_delete_message, unique_temp_path
-    
-    status_msg = None
-    file_path = None
-    try:
-        status_msg = await send_chunked_message(update.message.reply_text, "<i>Dang tai va phan tich video, doi xiu nhe...</i>")
-        
-        video_file = await context.bot.get_file(update.message.video.file_id)
-        file_path = unique_temp_path("video", ".mp4")
-        await video_file.download_to_drive(file_path)
-        
-        caption = update.message.caption or "Phan tich video nay."
-        video_part = await asyncio.to_thread(client.files.upload, file=file_path)
-        
-        prompt = f"{caption}\n(Hay tra loi ngan gon, xuc tich. KHONG dung the HTML nhu h1-h6, chi dung the <b> hoac <i>)"
-        
-        res = await call_gemini_async([video_part, prompt], model=MODEL_PRO)
-        
-        await safe_delete_message(context, update.message.chat_id, status_msg)
-        await send_chunked_message(update.message.reply_text, clean_for_telegram(res))
-    except Exception as e:
-        await safe_delete_message(context, update.message.chat_id, status_msg)
-        await update.message.reply_text(f"Loi phan tich video: {e}")
-    finally:
-        if file_path and os.path.exists(file_path):
-            os.remove(file_path)

@@ -15,11 +15,12 @@ from telegram.ext import (
 
 from config import TELEGRAM_BOT_TOKEN, logger
 from core_actions import load_pending_reminders
-from handlers.ai_chat import deep_command, handle_chat_route, handle_voice, learn_command, pitch_command, handle_video
+from handlers.ai_chat import deep_command, handle_chat_route, handle_voice, learn_command, pitch_command
 from handlers.finance import budget_command, goal_command, report_command, salary_command, spend_command
 from handlers.health import cook_command, food_command, handle_photo, healthsetup_command
 from handlers.reminders import remind_command
 from handlers.todo import tasks_command, todo_command
+from handlers.video import handle_video
 from jobs import manual_trigger, send_book_to_channel, send_business_cheat, send_news_to_channel
 from server import start_dummy_server
 from storage import finance_store, todo_store
@@ -106,8 +107,8 @@ def main():
 
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
-    app.add_handler(MessageHandler(filters.VIDEO, handle_video))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat_route))
 
     app.add_error_handler(on_error)
@@ -136,4 +137,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
