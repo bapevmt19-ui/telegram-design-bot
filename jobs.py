@@ -145,9 +145,19 @@ async def send_news_to_channel(context: ContextTypes.DEFAULT_TYPE):
             if not text_content:
                 continue
 
+            # BUG FIX (18/9, lần 9): trước đây cắt cứng text_content chỉ
+            # lấy 3000 ký tự đầu (~nửa trang) trước khi đưa cho Gemini
+            # dịch -> mọi bài báo dài hơn thế bị dịch THIẾU nguyên phần
+            # sau ký tự thứ 3000, không phải do Gemini dịch sót mà do
+            # nội dung đó chưa từng được gửi đi. Gemini Flash chịu được
+            # input dài hơn thế rất nhiều (context window cỡ triệu
+            # token), nên nâng lên 20000 ký tự — đủ cho gần như mọi bài
+            # báo trọn vẹn, vẫn có 1 giới hạn để tránh trường hợp hiếm
+            # gặp 1 trang cực dài (VD bị lỗi crawl dính nguyên navbar
+            # lặp) làm phình prompt vô tội vạ.
             trans_prompt = (
-                "Dịch bài viết sang tiếng Việt. Trả về định dạng HTML cơ bản "
-                f"(chỉ dùng <h3>, <p>, <ul>, <li>, <b>, <i>). Nguồn:\n\n{text_content[:3000]}"
+                "Dịch TOÀN BỘ bài viết sang tiếng Việt, không được bỏ sót đoạn nào. Trả về định dạng HTML cơ bản "
+                f"(chỉ dùng <h3>, <p>, <ul>, <li>, <b>, <i>). Nguồn:\n\n{text_content[:20000]}"
             )
             trans_html = await call_gemini_async(trans_prompt)
             trans_html = (

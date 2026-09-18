@@ -205,8 +205,16 @@ async def execute_todo(chat_id, context, task_text):
 
 
 async def execute_idea(chat_id, context, idea_text):
+    # Nâng cấp (18/9, lần 9): gắn id riêng cho mỗi ý tưởng — cần thiết
+    # để apply_idea_action() bên dưới biết chính xác ý tưởng nào cần
+    # sửa/xoá khi handle_chat_text (handlers/ai_chat.py) phát hiện yêu
+    # cầu sửa/xoá qua chat tự do.
+    idea_id = str(int(datetime.now().timestamp() * 1000))
+
     def _mutate(data):
-        data.setdefault("ideas", []).append({"date": datetime.now().strftime("%Y-%m-%d"), "text": idea_text})
+        data.setdefault("ideas", []).append(
+            {"id": idea_id, "date": datetime.now().strftime("%Y-%m-%d"), "text": idea_text}
+        )
         return data
 
     await ideas_store.update(_mutate)
@@ -217,6 +225,42 @@ async def execute_idea(chat_id, context, idea_text):
     await send_chunked_message(
         _rep, "💡 <b>Đã cất ý tưởng này vào Bộ Não Thứ 2!</b>\n<i>(Sếp có thể hỏi lại bất cứ lúc nào)</i>"
     )
+
+
+# Nâng cấp (18/9, lần 9): trước đây khi sếp chat tự do bảo "bỏ X đi",
+# Gemini chỉ TRẢ LỜI như đã sửa xong (không hề có cơ chế nào thực sự
+# chỉnh sửa ideas_store) — ý tưởng cũ vẫn nguyên vẹn, nên lần sau được
+# nạp lại làm ngữ cảnh là nội dung "đã xoá" lại xuất hiện y như cũ.
+# apply_idea_action() là hàm THỰC SỰ mutate dữ liệu, được gọi từ
+# handle_chat_text sau khi phát hiện dòng lệnh ẩn "IDEA_ACTION|..."
+# trong câu trả lời của Gemini (cùng kiểu marker-line như
+# AUDIO_VOCAB|/TOPIC_NAME|/BOOK_TITLE| đã dùng ở jobs.py) — không cần
+# thêm lệnh "/" nào, sếp vẫn gõ chat bình thường.
+async def apply_idea_action(action: str, idea_id: str, new_text: str = "") -> bool:
+    """Xoá hẳn (action="DELETE") hoặc thay toàn bộ nội dung
+    (action="EDIT", cần new_text) của 1 ý tưởng theo đúng id. Trả về
+    True nếu tìm thấy và áp dụng thành công; False nếu không khớp id
+    nào (VD Gemini đoán nhầm/id đã bị xoá trước đó) — gọi nơi dùng tự
+    quyết định có cần log cảnh báo hay không."""
+    found = False
+
+    def _mutate(data):
+        nonlocal found
+        ideas = data.get("ideas", [])
+        if action == "DELETE":
+            new_list = [i for i in ideas if i.get("id") != idea_id]
+            found = len(new_list) != len(ideas)
+            data["ideas"] = new_list
+        elif action == "EDIT" and new_text:
+            for i in ideas:
+                if i.get("id") == idea_id:
+                    i["text"] = new_text
+                    found = True
+                    break
+        return data
+
+    await ideas_store.update(_mutate)
+    return found
 
 
 # --- Hệ thống báo thức / nhắc nhở ---

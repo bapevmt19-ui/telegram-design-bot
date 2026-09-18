@@ -1,5 +1,27 @@
 # Life-OS Bot — bản refactor
 
+## Cập nhật (18/9, lần 10): `/deep` bắt buộc kết hợp góc nhìn Tâm lý học
+
+- Sếp phản hồi qua case thực tế `/deep trật tự sinh ra từ hỗn loạn`: góc nhìn số 2 của `/deep` trước đây chỉ ghi "Hoài nghi/Triết học" nên câu trả lời thiếu hẳn lăng kính tâm lý học (cơ chế nhận thức, thiên kiến, động lực tâm lý phía sau vấn đề).
+- Sửa prompt `deep_command` (`handlers/ai_chat.py`): góc nhìn số 2 đổi thành **"Hoài nghi — Triết học & Tâm lý học"**, bắt buộc phải nêu rõ CẢ HAI khía cạnh (triết học: bản chất gốc rễ/nghịch lý/giả định nền tảng; tâm lý học: cơ chế nhận thức-hành vi/động lực thật sự/thiên kiến tâm lý) chứ không được chỉ dừng ở rủi ro logic bề mặt.
+- Áp dụng cho **mọi chủ đề** dùng `/deep` từ nay về sau, không riêng gì "trật tự sinh ra từ hỗn loạn".
+
+## Cập nhật (18/9, lần 9): sửa dịch tin bị thiếu + sửa/xoá ý tưởng qua chat tự do
+
+- **Dịch tin tức bị thiếu so với bài gốc** (`jobs.py: send_news_to_channel`): nguyên nhân là code cắt cứng nội dung gốc chỉ lấy **3000 ký tự đầu** trước khi đưa Gemini dịch — bài báo dài hơn thế bị dịch thiếu hẳn phần sau, không phải do Gemini dịch sót. Nâng giới hạn lên 20000 ký tự (đủ cho gần như mọi bài báo trọn vẹn).
+- **"Bỏ X đi" trong chat tự do không có tác dụng thật** (`handlers/ai_chat.py`, `core_actions.py`): trước đây khi sếp yêu cầu sửa/xoá 1 ý tưởng qua chat thường, Gemini chỉ TRẢ LỜI như đã làm xong — không hề có cơ chế nào thực sự sửa `ideas_store`, nên ý tưởng cũ vẫn còn nguyên và xuất hiện lại ở lần chat sau. Giờ mỗi ý tưởng có `id` riêng; khi Gemini nhận ra đúng là yêu cầu sửa/xoá 1 ý tưởng đã lưu, nó tự chèn 1 dòng lệnh ẩn `IDEA_ACTION|DELETE|<id>` hoặc `IDEA_ACTION|EDIT|<id>|<nội dung mới>` ở cuối câu trả lời (sếp không thấy dòng này) — code parse dòng đó và **thực sự** cập nhật `ideas_store` qua `apply_idea_action()`, cùng kiểu marker-line như `AUDIO_VOCAB|`/`TOPIC_NAME|`/`BOOK_TITLE|` đã dùng ở nơi khác. Không thêm lệnh `/` nào — vẫn gõ chat bình thường như "Bỏ ceresis.vn đi".
+  - **Giới hạn cần biết**: chỉ hoạt động với ý tưởng nằm trong 5 ý tưởng gần nhất (phạm vi ngữ cảnh hiện có) và với ý tưởng có `id` (tạo từ lần cập nhật này trở đi, hoặc qua `/pitch` vốn đã có sẵn id). Vì dựa vào Gemini tự nhận diện đúng ý tưởng cần sửa thay vì chọn theo số thứ tự cố định, có xác suất nhỏ đoán nhầm nếu 2 ý tưởng gần đây nội dung khá giống nhau — đổi lại không cần thêm lệnh mới.
+
+## Cập nhật (18/9, lần 8): tinh chỉnh prompt persona "Quân sư" (chat tự do, /deep, /pitch)
+
+Theo góp ý sếp nhận được về giọng văn persona "Quân sư chiến lược" (`handlers/ai_chat.py`), không đổi kiến trúc gì (bot vốn đã gọi thẳng Gemini API, không qua UI đóng gói — đúng hướng được khuyên) — chỉ tinh chỉnh 3 system prompt:
+
+- **Chat tự do + `/deep`**: thêm chỉ dẫn TƯỜNG MINH cấm mào đầu/chào hỏi/nhắc lại câu hỏi trước khi vào nội dung (trước đây chỉ ghi chung "không sáo rỗng", chưa đủ để chặn kiểu mở bài máy móc).
+- **`/deep`**: thêm khung 3 góc nhìn bắt buộc — Lạc quan / Hoài nghi-Triết học / Hành động thực tế (góc thứ 3 bắt buộc phải có ví dụ/kịch bản cụ thể, không dừng ở nguyên lý chung chung).
+- **`/pitch`**: thêm bước ép steelman ý tưởng trước khi tìm điểm chết, để bot soi ra giả định ẩn/điểm mù thật sự thay vì chỉ liệt kê rủi ro bề mặt ai cũng đoán được.
+
+Không nâng cấp bộ nhớ dài hạn (Vector DB) trong lần này — bot đã có `/learn` (Bộ Nhớ Lõi, tự động chèn vào mọi prompt) đáp ứng phần lớn nhu cầu cá nhân hoá hiện tại; nâng lên Vector DB là đầu tư lớn hơn nhiều, để dành khi thực sự cần.
+
 ## Cập nhật (17/9, lần 7): sao lưu dữ liệu, báo cáo Excel, nhắc việc/nhắc nhở nâng cao, sửa Telegraph
 
 **Cần làm thêm trên Render** (ngoài code): thêm biến môi trường mới `TELEGRAM_CHAT_ID_BACKUP` (kênh riêng nhận file backup — sếp đã tạo, chat_id `-1004393711929`, nhớ đã thêm bot vào làm admin của kênh đó). `requirements.txt` có thêm `openpyxl` — Render tự cài lại khi deploy, không cần làm gì thêm.

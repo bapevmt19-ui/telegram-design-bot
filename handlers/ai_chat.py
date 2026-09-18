@@ -13,7 +13,7 @@ from telegram.ext import ContextTypes
 
 from ai_client import call_gemini_async, clean_for_telegram, client, parse_amount
 from config import MODEL_PRO
-from core_actions import add_reminder, execute_idea, execute_spend, execute_todo
+from core_actions import add_reminder, apply_idea_action, execute_idea, execute_spend, execute_todo
 from storage import health_store, ideas_store, memory_store, nutrition_store
 from telegram_helpers import safe_delete_message, send_chunked_message, unique_temp_path
 
@@ -28,8 +28,13 @@ async def handle_chat_text(update, context, text):
 
     try:
         ideas = await ideas_store.read()
-        recent_ideas = "\n".join(f"- {i['text']}" for i in ideas.get("ideas", [])[-5:])
-        ctx = f"KHO Ý TƯỞNG CỦA NGƯỜI DÙNG:\n{recent_ideas}\n\n" if recent_ideas else ""
+        # Nâng cấp (18/9, lần 9): kèm id ẩn của từng ý tưởng vào ngữ
+        # cảnh — cần để Gemini tham chiếu ĐÚNG ý tưởng khi sếp yêu cầu
+        # sửa/xoá (xem chỉ dẫn IDEA_ACTION| trong system_suffix bên
+        # dưới, và cách parse ở cuối hàm này).
+        recent_list = ideas.get("ideas", [])[-5:]
+        recent_ideas = "\n".join(f"[id={i.get('id', '?')}] {i['text']}" for i in recent_list)
+        ctx = f"KHO Ý TƯỞNG CỦA NGƯỜI DÙNG (mỗi dòng có id riêng):\n{recent_ideas}\n\n" if recent_ideas else ""
 
         today_str = datetime.now(VN_TZ).strftime("%Y-%m-%d")
         health = await health_store.read()
@@ -88,12 +93,53 @@ async def handle_chat_text(update, context, text):
             "tích...') — đi thẳng vào luận điểm cốt lõi ngay câu đầu tiên. "
             "Không bao giờ nói chung chung hay sáo rỗng. Dài hay ngắn tuỳ vào mức độ phức tạp của câu hỏi, "
             "nhưng phải CHẤT LƯỢNG. KHÔNG dùng markdown # hay **, chỉ dùng thẻ <b>, <i> chuẩn HTML. "
-            "Luôn xưng hô theo đúng luật trong Bộ Nhớ Lõi, nếu không có thì gọi là 'sếp' và xưng 'em')."
+            "Luôn xưng hô theo đúng luật trong Bộ Nhớ Lõi, nếu không có thì gọi là 'sếp' và xưng 'em'. "
+            # Nâng cấp (18/9, lần 9): trước đây khi sếp bảo "bỏ X đi",
+            # bot chỉ NÓI đã sửa xong chứ không hề có cơ chế nào thực
+            # sự chỉnh sửa ideas_store -> ý tưởng cũ vẫn còn nguyên,
+            # lần sau nạp lại làm ngữ cảnh là nội dung "đã xoá" quay
+            # lại y như cũ. Giờ nếu đúng là yêu cầu sửa/xoá 1 ý tưởng
+            # có trong KHO Ý TƯỞNG ở trên, bắt Gemini chèn thêm 1 dòng
+            # lệnh ẩn ở CUỐI câu trả lời để code phía dưới parse ra và
+            # THỰC SỰ áp dụng lên ideas_store (người dùng không thấy
+            # dòng này) — cùng kiểu marker-line như AUDIO_VOCAB|/
+            # TOPIC_NAME|/BOOK_TITLE| đã dùng ở jobs.py.
+            "NẾU người dùng đang yêu cầu SỬA hoặc XOÁ 1 ý tưởng CỤ THỂ đã có trong KHO Ý TƯỞNG ở trên "
+            "(VD 'bỏ X đi', 'sửa ý tưởng Y thành...'), PHẢI thêm đúng 1 dòng ở CUỐI CÙNG câu trả lời theo cú "
+            "pháp: xoá hẳn thì ghi IDEA_ACTION|DELETE|<id lấy đúng từ [id=...] tương ứng>, sửa nội dung thì ghi "
+            "IDEA_ACTION|EDIT|<id đó>|<toàn bộ nội dung MỚI của ý tưởng, đã bỏ phần cần xoá>. Dùng ĐÚNG id có "
+            "sẵn trong ngữ cảnh, KHÔNG tự bịa id. CHỈ chèn dòng này khi CHẮC CHẮN đúng là yêu cầu sửa/xoá 1 ý "
+            "tưởng đã lưu — nếu không phải, TUYỆT ĐỐI không chèn dòng IDEA_ACTION nào cả)."
         )
         prompt = ctx + text + system_suffix
 
         response = await call_gemini_async(prompt)
-        await send_chunked_message(update.message.reply_text, clean_for_telegram(response))
+
+        # Tách dòng lệnh ẩn IDEA_ACTION| (nếu có) ra khỏi nội dung hiển
+        # thị cho sếp, rồi áp dụng thật lên ideas_store.
+        visible_lines = []
+        action_type, action_id, action_new_text = None, None, ""
+        for line in response.split("\n"):
+            if line.startswith("IDEA_ACTION|"):
+                parts = line.split("|", 3)
+                if len(parts) >= 3:
+                    action_type = parts[1].strip().upper()
+                    action_id = parts[2].strip()
+                    action_new_text = parts[3].strip() if len(parts) > 3 else ""
+            else:
+                visible_lines.append(line)
+        visible_response = "\n".join(visible_lines).strip()
+
+        if action_type in ("DELETE", "EDIT") and action_id:
+            applied = await apply_idea_action(action_type, action_id, action_new_text)
+            if not applied:
+                logger.warning(
+                    "IDEA_ACTION %s cho id=%s không khớp ý tưởng nào (có thể Gemini đoán nhầm id).",
+                    action_type,
+                    action_id,
+                )
+
+        await send_chunked_message(update.message.reply_text, clean_for_telegram(visible_response))
     except Exception as e:
         await update.message.reply_text(f"⚠️ Lỗi Server AI: {e}")
 
@@ -124,6 +170,14 @@ async def deep_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # nhận được, để /deep không chỉ "suy luận sâu" chung chung mà
         # có cấu trúc rõ ràng, mỗi góc đều phải có ví dụ/kịch bản cụ
         # thể chứ không dừng ở nguyên lý trừu tượng.
+        # Nâng cấp (18/9, lần 10): sếp phản hồi cụ thể qua case
+        # "/deep trật tự sinh ra từ hỗn loạn" — góc nhìn số 2 trước đây
+        # chỉ ghi "Hoài nghi/Triết học" nên câu trả lời thiếu hẳn lăng
+        # kính tâm lý học (VD: cơ chế nhận thức, thiên kiến, động lực
+        # tâm lý đằng sau vấn đề) dù đây là góc quan trọng sếp muốn.
+        # Sửa để góc nhìn số 2 LUÔN bắt buộc kết hợp cả triết học lẫn
+        # tâm lý học, áp dụng cho MỌI chủ đề dùng /deep từ nay, không
+        # riêng "trật tự sinh ra từ hỗn loạn".
         prompt = (
             ctx
             + text
@@ -133,7 +187,10 @@ async def deep_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "vào luận điểm cốt lõi ngay câu đầu tiên. "
             "Trình bày theo đúng 3 góc nhìn sau (có thể đặt tiêu đề ngắn bằng <b>): "
             "1) Lạc quan — cơ hội/tiềm năng thực sự nếu mọi thứ thuận lợi; "
-            "2) Hoài nghi/Triết học — rủi ro, giả định ẩn, điểm mù, câu hỏi gốc rễ cần tự vấn; "
+            "2) Hoài nghi — Triết học & Tâm lý học — BẮT BUỘC kết hợp cả hai lăng kính: về triết học (bản "
+            "chất gốc rễ của vấn đề, nghịch lý, giả định nền tảng cần tự vấn) VÀ về tâm lý học (cơ chế nhận "
+            "thức/hành vi, động lực thật sự, thiên kiến tâm lý chi phối), không chỉ liệt kê rủi ro logic bề "
+            "mặt; nêu rõ ràng cả 2 khía cạnh, không được bỏ sót khía cạnh tâm lý học; "
             "3) Hành động thực tế — bước làm cụ thể, PHẢI có ví dụ/kịch bản thực tế minh hoạ, không dừng ở "
             "nguyên lý chung chung. "
             "Sử dụng thẻ <b>, <i> chuẩn HTML, KHÔNG dùng markdown # hay **.)"
