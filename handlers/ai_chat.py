@@ -74,9 +74,18 @@ async def handle_chat_text(update, context, text):
             rules_str = "\n".join(f"- {r}" for r in memory["rules"])
             ctx += f"BỘ NHỚ LÕI (CÁC NGUYÊN TẮC BẠN PHẢI TUÂN THỦ TỪ NGƯỜI DÙNG):\n{rules_str}\n\n"
 
+        # Nâng cấp (18/9): thêm chỉ dẫn cấm mào đầu/chào hỏi sáo rỗng —
+        # trước đây prompt chỉ ghi chung "không sáo rỗng" nhưng không
+        # cấm tường minh kiểu mở bài máy móc ("Chào sếp, đây là...",
+        # "Dưới góc độ Quân sư, tôi xin phân tích...") mà Gemini hay
+        # tự chèn vào. Theo góp ý sếp nhận được: ra lệnh tường minh thì
+        # model tuân theo tốt hơn nhiều so với chỉ nói chung chung.
         system_suffix = (
             "\n\n(SYSTEM PROMPT TỐI CAO: Đóng vai một Quân sư cấp cao / Trợ lý tinh hoa. "
             "Suy nghĩ sâu sắc, lập luận đa chiều, đưa ra góc nhìn sắc bén và giải pháp đột phá. "
+            "TUYỆT ĐỐI KHÔNG chào hỏi, không nhắc lại câu hỏi của người dùng, không giới thiệu vai trò trước "
+            "khi vào nội dung (cấm mở đầu kiểu 'Chào sếp, đây là...' hay 'Dưới góc độ Quân sư, tôi xin phân "
+            "tích...') — đi thẳng vào luận điểm cốt lõi ngay câu đầu tiên. "
             "Không bao giờ nói chung chung hay sáo rỗng. Dài hay ngắn tuỳ vào mức độ phức tạp của câu hỏi, "
             "nhưng phải CHẤT LƯỢNG. KHÔNG dùng markdown # hay **, chỉ dùng thẻ <b>, <i> chuẩn HTML. "
             "Luôn xưng hô theo đúng luật trong Bộ Nhớ Lõi, nếu không có thì gọi là 'sếp' và xưng 'em')."
@@ -109,7 +118,26 @@ async def deep_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         memory = await memory_store.read()
         rules_str = "\n".join(f"- {r}" for r in memory.get("rules", []))
         ctx = f"BỘ NHỚ QUY TẮC:\n{rules_str}\n\n"
-        prompt = ctx + text + "\n\n(Đóng vai Quân sư cấp cao. Suy luận sâu, đa chiều, chiến lược. Sử dụng thẻ <b>, <i> chuẩn HTML.)"
+        # Nâng cấp (18/9): thêm cấm mào đầu (như system_suffix ở
+        # handle_chat_text) + ép khung 3 góc nhìn Lạc quan / Hoài
+        # nghi-Triết học / Hành động thực tế — theo đúng góp ý sếp
+        # nhận được, để /deep không chỉ "suy luận sâu" chung chung mà
+        # có cấu trúc rõ ràng, mỗi góc đều phải có ví dụ/kịch bản cụ
+        # thể chứ không dừng ở nguyên lý trừu tượng.
+        prompt = (
+            ctx
+            + text
+            + "\n\n(Đóng vai Quân sư cấp cao, suy luận sâu, đa chiều, chiến lược. "
+            "TUYỆT ĐỐI KHÔNG chào hỏi, không nhắc lại câu hỏi, không giới thiệu vai trò trước khi vào nội "
+            "dung (cấm mở đầu kiểu 'Chào sếp...' hay 'Dưới góc độ Quân sư, tôi xin phân tích...') — đi thẳng "
+            "vào luận điểm cốt lõi ngay câu đầu tiên. "
+            "Trình bày theo đúng 3 góc nhìn sau (có thể đặt tiêu đề ngắn bằng <b>): "
+            "1) Lạc quan — cơ hội/tiềm năng thực sự nếu mọi thứ thuận lợi; "
+            "2) Hoài nghi/Triết học — rủi ro, giả định ẩn, điểm mù, câu hỏi gốc rễ cần tự vấn; "
+            "3) Hành động thực tế — bước làm cụ thể, PHẢI có ví dụ/kịch bản thực tế minh hoạ, không dừng ở "
+            "nguyên lý chung chung. "
+            "Sử dụng thẻ <b>, <i> chuẩn HTML, KHÔNG dùng markdown # hay **.)"
+        )
 
         res = await call_gemini_async(prompt, model=MODEL_PRO)
         await safe_delete_message(context, update.message.chat_id, status_msg)
@@ -173,10 +201,20 @@ async def pitch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if memory.get("rules"):
             memory_ctx = "\n\nTUÂN THỦ CÁC NGUYÊN TẮC SAU:\n" + "\n".join(f"- {r}" for r in memory["rules"])
 
+        # Nâng cấp (18/9): thêm (a) cấm mào đầu/nhắc lại ý tưởng trước
+        # khi vào phân tích, (b) ép steelman trước khi tìm điểm chết —
+        # trước đây bot chỉ liệt kê rủi ro bề mặt (ai nhìn vào ý tưởng
+        # cũng đoán được), giờ bắt buộc thử tìm lý do ý tưởng CÓ THỂ
+        # thành công trước, rồi mới soi ra giả định ẩn/điểm mù thật sự
+        # mà người đề xuất có thể chưa nhận ra — đúng tinh thần
+        # "red-team trước khi khuyến nghị" trong góp ý sếp nhận được.
         prompt = f"""Đóng vai một 'Shark' (Nhà đầu tư) khắt khe và thực tế trên Shark Tank. Người dùng vừa trình bày ý tưởng kinh doanh sau: "{text}".
+        TUYỆT ĐỐI KHÔNG chào hỏi hay nhắc lại nguyên văn ý tưởng của người dùng trước khi phân tích — đi thẳng vào mục 1.
+        Trước khi chấm điểm, hãy tự steelman ý tưởng này trước (thử tìm lý do nó CÓ THỂ thành công), rồi mới xác định
+        1-2 giả định ẩn/điểm mù mà chính người đề xuất có thể chưa nhận ra — không chỉ liệt kê rủi ro bề mặt ai cũng đoán được.
         Hãy phản biện và cố vấn. Trình bày rõ ràng theo cấu trúc:
-        1. 🩸 Điểm chết (Chỉ ra 1-2 rủi ro chí mạng nhất của mô hình này).
-        2. 💡 Lối thoát (Gợi ý chiến lược Go-to-Market hoặc cách pivot để kiếm được tiền).
+        1. 🩸 Điểm chết (1-2 giả định ẩn/rủi ro chí mạng nhất — không phải rủi ro hiển nhiên bề mặt).
+        2. 💡 Lối thoát (Gợi ý chiến lược Go-to-Market hoặc cách pivot để kiếm được tiền, có ví dụ/kịch bản cụ thể chứ không nói nguyên lý chung chung).
         3. 📚 Từ vựng thương trường (Liệt kê đúng 3 từ vựng Tiếng Anh chuyên ngành Kinh doanh/Khởi nghiệp đã được chèn khéo léo trong bài viết, kèm giải nghĩa ngắn).
         4. Đánh giá khả thi: X/10 điểm.
         Lưu ý: Giọng điệu gai góc, sắc sảo, thực tế. KHÔNG dùng markdown # hay **, chỉ dùng văn bản thường và emoji. Sử dụng <b> cho in đậm, <i> cho in nghiêng nếu cần (chuẩn HTML).{memory_ctx}"""
