@@ -12,9 +12,9 @@ from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 from ai_client import call_gemini_async, clean_for_telegram, client, parse_amount
-from config import MODEL_PRO
+from config import CONVERSATION_KEEP_LINES, IDEA_CONTEXT_LIMIT, MODEL_PRO
 from core_actions import add_reminder, apply_idea_action, execute_idea, execute_spend, execute_todo
-from storage import health_store, ideas_store, memory_store, nutrition_store
+from storage import conversation_store, health_store, ideas_store, memory_store, nutrition_store
 from telegram_helpers import safe_delete_message, send_chunked_message, unique_temp_path
 
 logger = logging.getLogger(__name__)
@@ -32,9 +32,29 @@ async def handle_chat_text(update, context, text):
         # cảnh — cần để Gemini tham chiếu ĐÚNG ý tưởng khi sếp yêu cầu
         # sửa/xoá (xem chỉ dẫn IDEA_ACTION| trong system_suffix bên
         # dưới, và cách parse ở cuối hàm này).
-        recent_list = ideas.get("ideas", [])[-5:]
+        # Nâng cấp (18/9, lần 11 — gói miễn phí): trước đây chỉ lấy 5 ý
+        # tưởng gần nhất -> yêu cầu sửa/xoá ý tưởng cũ hơn sẽ không tìm
+        # thấy id. Nâng lên IDEA_CONTEXT_LIMIT (40, xem config.py) để
+        # phạm vi "nhớ" rộng hơn hẳn mà không cần đổi hạ tầng lưu trữ.
+        recent_list = ideas.get("ideas", [])[-IDEA_CONTEXT_LIMIT:]
         recent_ideas = "\n".join(f"[id={i.get('id', '?')}] {i['text']}" for i in recent_list)
         ctx = f"KHO Ý TƯỞNG CỦA NGƯỜI DÙNG (mỗi dòng có id riêng):\n{recent_ideas}\n\n" if recent_ideas else ""
+
+        # Nâng cấp (18/9, lần 11 — gói miễn phí): trí nhớ hội thoại
+        # ngắn hạn — trước đây mỗi tin nhắn chat tự do là 1 lần gọi
+        # Gemini HOÀN TOÀN độc lập, bot không "nhớ" vừa nói chuyện gì
+        # với sếp ở tin nhắn ngay trước đó. Giờ nạp lại vài lượt hỏi-đáp
+        # gần nhất (theo từng chat_id) làm ngữ cảnh, để trả lời tiếp nối
+        # mạch chuyện thay vì lạc đề.
+        chat_key = str(update.message.chat_id)
+        convo_all = await conversation_store.read()
+        convo_turns = convo_all.get(chat_key, [])[-CONVERSATION_KEEP_LINES:]
+        if convo_turns:
+            convo_str = "\n".join(f"{'Sếp' if t.get('role') == 'user' else 'Em'}: {t.get('text', '')}" for t in convo_turns)
+            ctx += (
+                "LỊCH SỬ HỘI THOẠI GẦN ĐÂY (để hiểu ngữ cảnh câu hỏi hiện tại, KHÔNG cần nhắc lại nội dung này "
+                f"trong câu trả lời):\n{convo_str}\n\n"
+            )
 
         today_str = datetime.now(VN_TZ).strftime("%Y-%m-%d")
         health = await health_store.read()
@@ -138,6 +158,20 @@ async def handle_chat_text(update, context, text):
                     action_type,
                     action_id,
                 )
+
+        # Nâng cấp (18/9, lần 11): lưu lượt hỏi-đáp này vào trí nhớ hội
+        # thoại ngắn hạn, cắt bớt về đúng CONVERSATION_KEEP_LINES dòng
+        # gần nhất (giữ mỗi tin nhắn tối đa 500 ký tự để tránh phình dữ
+        # liệu nếu câu trả lời rất dài).
+        def _mutate_convo(data):
+            turns = data.setdefault(chat_key, [])
+            turns.append({"role": "user", "text": text[:500]})
+            turns.append({"role": "bot", "text": visible_response[:500]})
+            if len(turns) > CONVERSATION_KEEP_LINES:
+                del turns[: len(turns) - CONVERSATION_KEEP_LINES]
+            return data
+
+        await conversation_store.update(_mutate_convo)
 
         await send_chunked_message(update.message.reply_text, clean_for_telegram(visible_response))
     except Exception as e:

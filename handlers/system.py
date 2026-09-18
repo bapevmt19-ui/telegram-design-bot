@@ -5,8 +5,23 @@ thời gian không dùng) mở chat với bot sẽ không biết bot làm đư�
 cũng không có gì hiện ra khi gõ "/" trong Telegram (vì chưa từng gọi
 set_my_commands — xem post_init trong main.py).
 """
-from telegram import Update
+from telegram import ReplyKeyboardMarkup, Update
 from telegram.ext import ContextTypes
+
+from core_actions import execute_undo
+
+# Nâng cấp (18/9, lần 11 — gói miễn phí): menu nút bấm nhanh (persistent
+# reply keyboard) cho các lệnh KHÔNG cần thêm tham số — bấm nút coi như
+# gõ đúng lệnh đó rồi gửi, đỡ phải nhớ/gõ tay. Gửi kèm mỗi lần /start
+# (Telegram tự giữ nguyên bàn phím này cho các tin nhắn sau, tới khi bị
+# thay bằng bàn phím khác).
+QUICK_KEYBOARD = ReplyKeyboardMarkup(
+    [
+        ["/tasks", "/report", "/remind_list"],
+        ["/export_data", "/help"],
+    ],
+    resize_keyboard=True,
+)
 
 # Nâng cấp (17/9, lần 7): thêm VÍ DỤ CỤ THỂ cho từng lệnh (theo yêu
 # cầu của sếp) — trước đây chỉ ghi mẫu cú pháp trừu tượng
@@ -46,20 +61,26 @@ HELP_TEXT = """🤖 <b>Quản Gia Life-OS — Danh sách lệnh</b>
 
 📎 <b>Khác</b>
 Gửi ảnh/voice/video kèm caption — bot tự phân tích bằng Gemini (gõ câu hỏi làm CAPTION của ảnh/video TRƯỚC khi bấm gửi, không nhắn tin riêng sau)
-/export_data — tải ngay file sao lưu toàn bộ dữ liệu bot (cũng tự động gửi vào kênh riêng mỗi Chủ nhật 22h)
+/undo — hoàn tác NGAY hành động /spend hoặc /todo gần nhất (lỡ tay gõ nhầm số tiền/nội dung)
+/export_data — tải ngay file sao lưu toàn bộ dữ liệu bot (cũng tự động gửi vào kênh riêng mỗi Chủ nhật 22h; 21h Chủ nhật hàng tuần còn có tin tổng kết chi tiêu + dinh dưỡng cả tuần)
 /push — kích hoạt thủ công bản tin định kỳ (tin tức/cheat sheet/sách) để test thử
-/start, /help — xem lại hướng dẫn này bất cứ lúc nào
+/start, /help — xem lại hướng dẫn này bất cứ lúc nào (gõ /start cũng hiện lại menu nút bấm nhanh)
 
-<i>Chỉ chat_id đã được cấp phép mới dùng được bot (xem ALLOWED_CHAT_IDS).</i>"""
+<i>Chỉ chat_id đã được cấp phép mới dùng được bot (xem ALLOWED_CHAT_IDS). Chat tự do giờ có nhớ vài lượt hỏi-đáp gần nhất để hiểu mạch chuyện hơn.</i>"""
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Xin chào sếp! Em là Quản Gia Life-OS, sẵn sàng phục vụ.\n\n"
-        "Gõ /help để xem đầy đủ danh sách lệnh.",
+        "Gõ /help để xem đầy đủ danh sách lệnh. Em vừa để sẵn menu nút bấm nhanh bên dưới cho các lệnh hay dùng.",
         parse_mode="HTML",
+        reply_markup=QUICK_KEYBOARD,
     )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(HELP_TEXT, parse_mode="HTML")
+
+
+async def undo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await execute_undo(update.message.chat_id, context)

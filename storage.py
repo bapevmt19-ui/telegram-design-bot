@@ -40,11 +40,13 @@ from typing import Any, Callable
 
 from config import (
     CONTENT_HISTORY_FILE,
+    CONVERSATION_FILE,
     DATABASE_URL,
     DB_SSL,
     FINANCE_FILE,
     HEALTH_FILE,
     IDEAS_FILE,
+    LAST_ACTION_FILE,
     MEMORY_FILE,
     NUTRITION_FILE,
     RECURRING_REMINDERS_FILE,
@@ -249,6 +251,11 @@ settings_store = _make_store("settings", SETTINGS_FILE, lambda: {})
 # lưu lại để nạp đăng ký lại đúng vào job_queue sau khi bot restart
 # (xem load_recurring_reminders trong handlers/reminders.py).
 recurring_reminders_store = _make_store("recurring_reminders", RECURRING_REMINDERS_FILE, lambda: {"items": []})
+# Nâng cấp (18/9, lần 11 — gói miễn phí): lịch sử hội thoại ngắn hạn
+# của chat tự do (key = chat_id dạng chuỗi -> list các lượt hỏi/đáp gần
+# nhất) và hành động ghi dữ liệu gần nhất (/spend, /todo) để /undo dùng.
+conversation_store = _make_store("conversation_history", CONVERSATION_FILE, lambda: {})
+last_action_store = _make_store("last_action", LAST_ACTION_FILE, lambda: {})
 
 # (key, file_path cũ, default_factory) — dùng cho migrate 1 lần bên dưới.
 _ALL_STORES_META = [
@@ -262,6 +269,8 @@ _ALL_STORES_META = [
     ("content_history", CONTENT_HISTORY_FILE, lambda: {"cheat_topics": [], "book_titles": []}),
     ("settings", SETTINGS_FILE, lambda: {}),
     ("recurring_reminders", RECURRING_REMINDERS_FILE, lambda: {"items": []}),
+    ("conversation_history", CONVERSATION_FILE, lambda: {}),
+    ("last_action", LAST_ACTION_FILE, lambda: {}),
 ]
 
 

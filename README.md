@@ -1,5 +1,18 @@
 # Life-OS Bot — bản refactor
 
+## Cập nhật (18/9, lần 11): 6 nâng cấp KHÔNG tốn thêm chi phí
+
+Toàn bộ mục dưới đây dùng lại đúng hạ tầng free hiện có (Neon Postgres, Gemini free tier) — không thêm biến môi trường, không thêm dịch vụ trả phí nào.
+
+- **Trí nhớ hội thoại ngắn hạn cho chat tự do** (`handlers/ai_chat.py`, kho mới `conversation_history`): trước đây mỗi tin nhắn chat thường là 1 lần gọi Gemini hoàn toàn độc lập, bot không "nhớ" vừa nói gì ở tin trước. Giờ lưu lại `CONVERSATION_KEEP_LINES` (6 dòng ≈ 3 lượt hỏi-đáp) gần nhất theo từng chat_id, đưa vào ngữ cảnh mỗi lần hỏi tiếp.
+- **Mở rộng phạm vi "nhớ" ý tưởng khi sửa/xoá qua chat** (`config.py: IDEA_CONTEXT_LIMIT`): nâng từ 5 lên 40 ý tưởng gần nhất được đưa vào ngữ cảnh cho Gemini nhận diện — giảm hẳn trường hợp "bảo xoá X mà không xoá được" vì ý tưởng đó nằm ngoài phạm vi nhìn thấy của bot (hạn chế đã ghi ở bản lần 9).
+- **Cảnh báo ngân sách SỚM** (`core_actions.py: execute_spend`): trước đây chỉ cảnh báo sau khi đã tiêu ÂM quỹ. Giờ thêm mốc cảnh báo ở 80% (cả theo từng hũ ngân sách lẫn tổng ngân sách tháng), để biết trước khi âm chứ không phải sau.
+- **Tổng kết chi tiêu + dinh dưỡng cuối tuần tự động** (`jobs.py: weekly_summary_job`): gửi vào chat riêng mỗi Chủ Nhật 21h (trước giờ backup 22h) — tổng chi tuần theo từng danh mục, và trung bình calo/ngày nếu có dùng `/healthsetup` + ghi món ăn. Thuần tính toán trên dữ liệu sẵn có, không gọi thêm Gemini.
+- **Lệnh `/undo`** (`core_actions.py: execute_undo`, kho mới `last_action`): hoàn tác ĐÚNG 1 hành động `/spend` hoặc `/todo` gần nhất nếu lỡ tay gõ nhầm số tiền/nội dung — không hoàn tác được nhiều bước, chỉ bước cuối cùng.
+- **Menu nút bấm nhanh** (`handlers/system.py: QUICK_KEYBOARD`): gõ `/start` sẽ hiện sẵn bàn phím nút bấm cho các lệnh hay dùng không cần tham số (`/tasks /report /remind_list /export_data /help`), đỡ phải nhớ/gõ tay.
+
+**Không nằm trong file này (thiết lập bên ngoài, cũng miễn phí):** giám sát uptime thật sự (báo lỗi khi bot sập, khác với cron-job.org hiện tại chỉ ping giữ ấm) — khuyến nghị dùng UptimeRobot free, trỏ vào đúng URL Render của bot, bật cảnh báo qua Telegram/email khi ping thất bại.
+
 ## Cập nhật (18/9, lần 10): `/deep` bắt buộc kết hợp góc nhìn Tâm lý học
 
 - Sếp phản hồi qua case thực tế `/deep trật tự sinh ra từ hỗn loạn`: góc nhìn số 2 của `/deep` trước đây chỉ ghi "Hoài nghi/Triết học" nên câu trả lời thiếu hẳn lăng kính tâm lý học (cơ chế nhận thức, thiên kiến, động lực tâm lý phía sau vấn đề).

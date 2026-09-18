@@ -13,11 +13,23 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from ai_client import call_gemini_async, clean_for_telegram
 from config import REMINDER_FOLLOWUP_MINUTES
-from storage import finance_store, ideas_store, reminders_store, todo_store
+from storage import finance_store, ideas_store, last_action_store, reminders_store, todo_store
 from telegram_helpers import send_chunked_message
 
 logger = logging.getLogger(__name__)
 VN_TZ = pytz.timezone("Asia/Ho_Chi_Minh")
+
+
+# Nâng cấp (18/9, lần 11 — gói miễn phí): lệnh /undo. Mỗi lần /spend
+# hoặc /todo ghi dữ liệu thành công, lưu lại "hành động gần nhất" theo
+# từng chat_id (đè lên hành động trước đó) — /undo chỉ hoàn tác được
+# ĐÚNG 1 hành động gần nhất này, không phải hoàn tác nhiều bước.
+async def _record_last_action(chat_id, action_type: str, payload: dict):
+    def _mutate(data):
+        data[str(chat_id)] = {"type": action_type, "payload": payload}
+        return data
+
+    await last_action_store.update(_mutate)
 
 
 async def execute_spend(chat_id, context, amount, reason):
@@ -47,20 +59,24 @@ async def execute_spend(chat_id, context, amount, reason):
             logger.warning("Không phân loại được chi tiêu bằng AI: %s", e)
             category = "Khac"
 
+    new_expense = {
+        "date": datetime.now(VN_TZ).strftime("%Y-%m-%d"),
+        "amount": amount,
+        "reason": reason,
+        "category": category,
+    }
+
     def _mutate(data):
-        data.setdefault("expenses", []).append(
-            {
-                "date": datetime.now(VN_TZ).strftime("%Y-%m-%d"),
-                "amount": amount,
-                "reason": reason,
-                "category": category,
-            }
-        )
+        data.setdefault("expenses", []).append(new_expense)
         return data
 
     # Đọc-sửa-ghi trong 1 lock: 2 khoản chi phát sinh gần như đồng
     # thời (VD: gõ lệnh + voice cùng lúc) sẽ không ghi đè mất nhau.
     finance = await finance_store.update(_mutate)
+
+    # Nâng cấp (18/9, lần 11): lưu lại khoản chi vừa ghi để /undo có
+    # thể xoá đúng nó nếu sếp lỡ tay gõ nhầm số tiền/lý do.
+    await _record_last_action(chat_id, "spend", new_expense)
 
     current_month = datetime.now(VN_TZ).strftime("%Y-%m")
     month_expenses = [e for e in finance["expenses"] if e["date"].startswith(current_month)]
@@ -80,10 +96,17 @@ async def execute_spend(chat_id, context, amount, reason):
         msg += f"📦 <b>Quỹ {category}:</b> Còn lại {cat_remaining:,.0f} / {cat_budget:,.0f} VNĐ\n"
         if cat_remaining < 0:
             msg += f"🚨 <b>CẢNH BÁO: SẾP ĐÃ TIÊU ÂM QUỸ {category.upper()}!</b>\n\n"
+        elif cat_budget > 0 and cat_spent / cat_budget >= 0.8:
+            # Nâng cấp (18/9, lần 11): cảnh báo SỚM khi sắp hết quỹ
+            # (>= 80%) thay vì chỉ báo sau khi đã tiêu âm — trước đây
+            # chỉ có 1 mốc cảnh báo duy nhất là lúc đã âm quỹ.
+            msg += f"⚠️ <i>Đã dùng {cat_spent / cat_budget * 100:.0f}% quỹ {category} tháng này, sắp hết.</i>\n\n"
 
     msg += f"💰 <b>TỔNG TIỀN CÒN LẠI THÁNG NÀY:</b> {global_remaining:,.0f} VNĐ"
     if global_remaining < 0:
         msg += "\n\n💀 <b>BÁO ĐỘNG ĐỎ: SẾP ĐÃ TIÊU ÂM TOÀN BỘ NGÂN SÁCH!</b>"
+    elif total_budget > 0 and total_spent / total_budget >= 0.8:
+        msg += f"\n\n⚠️ <i>Đã dùng {total_spent / total_budget * 100:.0f}% tổng ngân sách tháng này.</i>"
 
     async def _rep(t, parse_mode="HTML"):
         return await context.bot.send_message(chat_id=chat_id, text=t, parse_mode=parse_mode)
@@ -191,6 +214,9 @@ async def execute_todo(chat_id, context, task_text):
         return data
 
     await todo_store.update(_mutate)
+    # Nâng cấp (18/9, lần 11): lưu lại việc vừa thêm để /undo có thể
+    # xoá đúng nó nếu sếp lỡ tay gõ nhầm nội dung.
+    await _record_last_action(chat_id, "todo", {"id": task_id, "text": clean_text})
 
     tag_note = ""
     if urgent:
@@ -261,6 +287,73 @@ async def apply_idea_action(action: str, idea_id: str, new_text: str = "") -> bo
 
     await ideas_store.update(_mutate)
     return found
+
+
+async def execute_undo(chat_id, context):
+    """Hoàn tác ĐÚNG 1 hành động ghi dữ liệu gần nhất (/spend hoặc
+    /todo) của chat_id này — xem _record_last_action() ở trên. Sau khi
+    dùng, xoá luôn "hành động gần nhất" để tránh bấm /undo nhiều lần
+    liên tiếp hoàn tác nhầm quá xa."""
+    last_all = await last_action_store.read()
+    action = last_all.get(str(chat_id))
+
+    if not action:
+        await context.bot.send_message(chat_id=chat_id, text="Không có hành động nào gần đây để hoàn tác.")
+        return
+
+    action_type = action.get("type")
+    payload = action.get("payload", {})
+    removed = False
+
+    if action_type == "spend":
+        def _mutate(data):
+            nonlocal removed
+            expenses = data.get("expenses", [])
+            # Tìm từ CUỐI danh sách lên (khoản chi vừa thêm luôn nằm ở
+            # cuối, trừ khi đã có thao tác khác chen vào giữa chừng).
+            for i in range(len(expenses) - 1, -1, -1):
+                e = expenses[i]
+                if (
+                    e.get("date") == payload.get("date")
+                    and e.get("amount") == payload.get("amount")
+                    and e.get("reason") == payload.get("reason")
+                    and e.get("category") == payload.get("category")
+                ):
+                    del expenses[i]
+                    removed = True
+                    break
+            return data
+
+        await finance_store.update(_mutate)
+        msg = (
+            f"↩️ Đã hoàn tác khoản chi {payload.get('amount', 0):,.0f} VNĐ ({payload.get('reason', '')})."
+            if removed
+            else "⚠️ Không tìm thấy khoản chi này nữa (có thể đã bị xoá/sửa từ trước)."
+        )
+    elif action_type == "todo":
+        def _mutate(data):
+            nonlocal removed
+            tasks = data.get("tasks", [])
+            new_tasks = [t for t in tasks if t.get("id") != payload.get("id")]
+            removed = len(new_tasks) != len(tasks)
+            data["tasks"] = new_tasks
+            return data
+
+        await todo_store.update(_mutate)
+        msg = (
+            f"↩️ Đã hoàn tác việc vừa thêm: {payload.get('text', '')}."
+            if removed
+            else "⚠️ Không tìm thấy việc này nữa (có thể đã hoàn thành/xoá từ trước)."
+        )
+    else:
+        msg = "Không rõ loại hành động để hoàn tác."
+
+    def _clear(data):
+        data.pop(str(chat_id), None)
+        return data
+
+    await last_action_store.update(_clear)
+    await context.bot.send_message(chat_id=chat_id, text=msg)
 
 
 # --- Hệ thống báo thức / nhắc nhở ---

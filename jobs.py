@@ -2,7 +2,7 @@
 import asyncio
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import feedparser
 import pytz
@@ -15,7 +15,7 @@ from telegram.ext import ContextTypes
 from ai_client import call_gemini_async, clean_for_telegram, telegraph_client
 from config import CHAT_ID_BOOKS, CHAT_ID_NEWS, CHAT_ID_PRIVATE, RSS_FEEDS_AI, RSS_FEEDS_DESIGN
 from core_actions import is_deadline_overdue, render_tasks_message
-from storage import content_history_store, finance_store, todo_store
+from storage import content_history_store, finance_store, health_store, nutrition_store, todo_store
 from telegram_helpers import send_chunked_message, unique_temp_path
 
 logger = logging.getLogger(__name__)
@@ -279,3 +279,65 @@ async def broadcast_tasks_reminder(context: ContextTypes.DEFAULT_TYPE, urgent_on
 
 async def broadcast_urgent_tasks_reminder(context: ContextTypes.DEFAULT_TYPE):
     await broadcast_tasks_reminder(context, urgent_only=True)
+
+
+# Nâng cấp (18/9, lần 11 — gói miễn phí): tổng kết nhanh cuối tuần —
+# thuần tính toán trên dữ liệu tài chính/sức khoẻ ĐÃ CÓ SẴN trong
+# Postgres, KHÔNG gọi Gemini (không tốn thêm hạn mức free API), gửi vào
+# chat riêng của sếp mỗi Chủ Nhật, trước giờ backup tự động (xem
+# main.py: 21h, backup chạy lúc 22h).
+async def weekly_summary_job(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        today = datetime.now(VN_TZ).date()
+        week_start = today - timedelta(days=6)
+
+        finance = await finance_store.read()
+        week_expenses = []
+        for e in finance.get("expenses", []):
+            try:
+                e_date = datetime.strptime(e["date"], "%Y-%m-%d").date()
+            except Exception:
+                continue
+            if week_start <= e_date <= today:
+                week_expenses.append(e)
+        total_week = sum(e["amount"] for e in week_expenses)
+
+        cat_totals: dict[str, float] = {}
+        for e in week_expenses:
+            cat = e.get("category", "Khac")
+            cat_totals[cat] = cat_totals.get(cat, 0) + e["amount"]
+        cat_lines = "\n".join(
+            f"  • {c}: {v:,.0f} VNĐ" for c, v in sorted(cat_totals.items(), key=lambda x: -x[1])
+        )
+
+        msg = (
+            f"📅 <b>TỔNG KẾT TUẦN ({week_start.strftime('%d/%m')} - {today.strftime('%d/%m')})</b>\n\n"
+            f"💸 <b>Tổng chi tiêu tuần:</b> {total_week:,.0f} VNĐ\n"
+        )
+        if cat_lines:
+            msg += cat_lines + "\n"
+        if not week_expenses:
+            msg += "  <i>(Không có khoản chi nào được ghi trong tuần)</i>\n"
+
+        health = await health_store.read()
+        nutrition = await nutrition_store.read()
+        if health and nutrition:
+            target = health.get("target_calories", 0)
+            days_with_data, total_calories = 0, 0
+            d = week_start
+            while d <= today:
+                day_data = nutrition.get(d.strftime("%Y-%m-%d"))
+                if day_data:
+                    days_with_data += 1
+                    total_calories += day_data.get("consumed_calories", 0)
+                d += timedelta(days=1)
+            if days_with_data:
+                avg = total_calories / days_with_data
+                msg += (
+                    f"\n🍽️ <b>Trung bình calo/ngày (các ngày có ghi nhận):</b> {avg:,.0f} / {target:,.0f} kcal "
+                    f"({days_with_data}/7 ngày có ghi nhận)"
+                )
+
+        await context.bot.send_message(chat_id=CHAT_ID_PRIVATE, text=clean_for_telegram(msg), parse_mode=ParseMode.HTML)
+    except Exception as e:
+        logger.error("Lỗi gửi tổng kết tuần: %s", e)

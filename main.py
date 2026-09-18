@@ -31,7 +31,7 @@ from handlers.reminders import (
     remind_list_command,
     remind_stop_command,
 )
-from handlers.system import help_command, start_command
+from handlers.system import help_command, start_command, undo_command
 from handlers.todo import tasks_command, todo_command
 from handlers.video import handle_video
 from jobs import (
@@ -42,6 +42,7 @@ from jobs import (
     send_book_to_channel,
     send_business_cheat,
     send_news_to_channel,
+    weekly_summary_job,
 )
 from server import start_dummy_server
 from storage import finance_store, migrate_legacy_json_if_needed, reminders_store, todo_store
@@ -192,6 +193,7 @@ async def post_init(app: Application):
             BotCommand("food", "Tra cứu dinh dưỡng"),
             BotCommand("cook", "Gợi ý món ăn"),
             BotCommand("export_data", "Tải file sao lưu dữ liệu"),
+            BotCommand("undo", "Hoàn tác spend/todo gần nhất"),
             BotCommand("push", "Kích hoạt thủ công bản tin định kỳ"),
         ]
     )
@@ -243,6 +245,7 @@ def main():
     # đăng ký handler cho nó -> lệnh /deep chưa từng hoạt động.
     app.add_handler(CommandHandler("deep", deep_command))
     app.add_handler(CommandHandler("export_data", export_data_command))
+    app.add_handler(CommandHandler("undo", undo_command))
     app.add_handler(CommandHandler("push", manual_trigger))
 
     app.add_handler(CallbackQueryHandler(button_callback))
@@ -266,6 +269,9 @@ def main():
     # - Nhắc RIÊNG việc !gấp/quá hạn mỗi 2 tiếng trong giờ hành chính
     #   (8h-18h), để không bị trôi giữa 2 lần nhắc cố định ở trên.
     app.job_queue.run_daily(remind_expense_job, time=time(hour=23, minute=0, tzinfo=VN_TZ))
+    # Nâng cấp (18/9, lần 11): tổng kết chi tiêu + dinh dưỡng cả tuần,
+    # gửi trước giờ backup tự động (22h) cùng ngày Chủ Nhật.
+    app.job_queue.run_daily(weekly_summary_job, time=time(hour=21, minute=0, tzinfo=VN_TZ), days=(6,))
     app.job_queue.run_daily(weekly_backup_job, time=time(hour=22, minute=0, tzinfo=VN_TZ), days=(6,))
     for h, m in [(9, 0), (13, 30), (17, 0)]:
         app.job_queue.run_daily(broadcast_tasks_reminder, time=time(hour=h, minute=m, tzinfo=VN_TZ))

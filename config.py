@@ -95,6 +95,26 @@ CONTENT_HISTORY_FILE = "content_history.json"
 # khi bot restart (xem handlers/reminders.py).
 SETTINGS_FILE = "settings.json"
 RECURRING_REMINDERS_FILE = "recurring_reminders.json"
+# Nâng cấp (18/9, lần 11 — gói miễn phí):
+# - CONVERSATION_FILE: lưu vài lượt hỏi-đáp gần nhất của chat tự do
+#   theo từng chat_id, để bot "nhớ" đang nói chuyện gì giữa các tin
+#   nhắn thay vì mỗi câu là 1 phiên hỏi Gemini hoàn toàn độc lập.
+# - LAST_ACTION_FILE: lưu hành động ghi dữ liệu gần nhất (/spend hoặc
+#   /todo) theo từng chat_id, để lệnh /undo biết chính xác cần hoàn
+#   tác cái gì.
+CONVERSATION_FILE = "conversation_history.json"
+LAST_ACTION_FILE = "last_action.json"
+# Số dòng hội thoại (user+bot tính chung) giữ lại làm ngữ cảnh cho chat
+# tự do — 6 dòng = 3 lượt hỏi-đáp gần nhất, đủ để hiểu mạch chuyện mà
+# không làm phình prompt quá nhiều.
+CONVERSATION_KEEP_LINES = 6
+# Nâng cấp (18/9, lần 11): trước đây chat tự do chỉ "nhìn thấy" 5 ý
+# tưởng gần nhất trong Bộ Não Thứ 2 -> yêu cầu sửa/xoá 1 ý tưởng cũ hơn
+# 5 cái gần nhất sẽ không tìm thấy id để áp dụng. Nâng lên 40 (Gemini
+# Flash chịu được input lớn hơn thế rất nhiều, không tốn thêm chi phí,
+# chỉ là nhiều chữ hơn trong 1 lần gọi) để phạm vi "nhớ" ý tưởng cũ rộng
+# hơn hẳn mà không cần đổi hạ tầng gì (VD thêm CSDL vector).
+IDEA_CONTEXT_LIMIT = 40
 # Nếu sau ngần này phút kể từ lúc nhắc mà sếp chưa bấm "Đã xong", bot
 # tự nhắc lại thêm 1 lần nữa cho các nhắc nhở có mốc thời gian cụ thể
 # (/remind) — xem core_actions.py.
