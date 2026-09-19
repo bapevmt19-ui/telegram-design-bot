@@ -126,12 +126,24 @@ async def send_news_to_channel(context: ContextTypes.DEFAULT_TYPE):
     await send_chunked_message(_rep, msg)
 
     articles_sent = 0
-    try:
-        feeds = [
-            ("💡 UX/UI Design", RSS_FEEDS_DESIGN["💡 UX/UI Design"], "🎨 Design"),
-            ("🤖 AI News", RSS_FEEDS_AI["🤖 AI News"], "🤖 AI"),
-        ]
-        for _title, url, tag in feeds:
+    feeds = [
+        ("💡 UX/UI Design", RSS_FEEDS_DESIGN["💡 UX/UI Design"], "🎨 Design"),
+        ("🤖 AI News", RSS_FEEDS_AI["🤖 AI News"], "🤖 AI"),
+    ]
+    for _title, url, tag in feeds:
+        # BUG FIX (19/9, lần 13): trước đây CẢ VÒNG LẶP nằm chung trong
+        # 1 try/except duy nhất -> hễ 1 nguồn tin (VD Design) gặp lỗi
+        # bất kỳ (mạng chập chờn, Gemini quá tải, Telegraph lỗi tạm
+        # thời...) là raise exception, thoát khỏi vòng lặp NGAY LẬP TỨC
+        # -> nguồn tin còn lại (VD AI) không bao giờ được thử, và nếu
+        # nguồn tin lỗi đó lại là nguồn ĐẦU TIÊN thì articles_sent=0
+        # suốt -> không đăng được bài nào, cũng không có cả câu "đã
+        # xong" (đoạn if articles_sent > 0 bên dưới), bot coi như IM
+        # LẶNG hoàn toàn — đúng hiện tượng sếp gặp sáng 19/9 (có câu mở
+        # đầu, sau đó không có gì nữa). Giờ mỗi nguồn tin có try/except
+        # RIÊNG: 1 nguồn lỗi chỉ bỏ qua đúng nguồn đó, nguồn còn lại vẫn
+        # được thử bình thường.
+        try:
             # feedparser.parse + trafilatura là network I/O đồng bộ ->
             # chạy trong thread riêng.
             feed = await asyncio.to_thread(feedparser.parse, url)
@@ -170,8 +182,9 @@ async def send_news_to_channel(context: ContextTypes.DEFAULT_TYPE):
             )
             await send_chunked_message(_rep, f"{tag}: <a href='{response['url']}'>{entry.title}</a>")
             articles_sent += 1
-    except Exception as e:
-        logger.error("Lỗi cào tin: %s", e)
+        except Exception as e:
+            logger.error("Lỗi cào/dịch/đăng nguồn tin '%s' (%s): %s", _title, url, e)
+            continue
 
     if articles_sent > 0:
         keyboard = [[InlineKeyboardButton("👁️ Xác nhận đã đọc xong tin", callback_data=f"read_{today_str}")]]
@@ -180,6 +193,20 @@ async def send_news_to_channel(context: ContextTypes.DEFAULT_TYPE):
             text="📡 <i>Đã dịch và cập nhật xong bản tin hôm nay!</i>",
             parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+    else:
+        # Nâng cấp (19/9, lần 13): trước đây nếu CẢ 2 nguồn tin đều
+        # lỗi/rỗng, bot im lặng hoàn toàn — sếp không có cách nào biết
+        # được là bot bị lỗi hay đơn giản hôm đó không có tin gì (2 tình
+        # huống nhìn giống hệt nhau: sau câu mở đầu không có gì thêm).
+        # Giờ báo rõ để sếp biết cần /push lại thủ công nếu muốn.
+        await context.bot.send_message(
+            chat_id=CHAT_ID_NEWS,
+            text=(
+                "⚠️ <i>Hôm nay không lấy được tin nào (lỗi khi cào/dịch cả 2 nguồn tin, xem log Render để biết "
+                "chi tiết). Sếp gõ /push để bot thử lại thủ công.</i>"
+            ),
+            parse_mode=ParseMode.HTML,
         )
 
 
